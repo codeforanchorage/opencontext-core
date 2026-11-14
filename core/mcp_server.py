@@ -24,6 +24,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from core.logging_utils import (
@@ -357,7 +358,15 @@ class MCPServer:
                     else str(e)
                 )
             else:
-                code, message, data = -32603, "Internal error", str(e)
+                # A genuine fault. Its text can carry file paths,
+                # library internals or upstream response fragments,
+                # so it never goes to the client: the client gets a
+                # correlation ID, and the full exception is logged
+                # under that ID. (Caller errors above keep their
+                # actionable `data`; the client can fix the request.)
+                error_id = uuid.uuid4().hex
+                code, message = -32603, "Internal error"
+                data = f"Error ID: {error_id}"
             is_caller_error = code != -32603
             error_response = {
                 "jsonrpc": "2.0",
@@ -379,12 +388,20 @@ class MCPServer:
             response_log_data["mcp_era"] = era
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
-            log = logger.warning if is_caller_error else logger.error
-            log(
-                f"Error handling JSON-RPC request {method}: {e}",
-                extra={**response_log_data, "error_type": type(e).__name__},
-                exc_info=not is_caller_error,
-            )
+            extra = {**response_log_data, "error_type": type(e).__name__}
+            if is_caller_error:
+                logger.warning(
+                    f"Error handling JSON-RPC request {method}: {e}",
+                    extra=extra,
+                )
+            else:
+                extra["error_id"] = error_id
+                logger.error(
+                    f"Error handling JSON-RPC request {method} "
+                    f"[error_id={error_id}]: {e}",
+                    extra=extra,
+                    exc_info=True,
+                )
 
             # Don't send error response for notifications
             if is_notification:

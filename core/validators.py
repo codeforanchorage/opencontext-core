@@ -138,6 +138,10 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
       allowed is exactly what the config says). The first entry is the
       origin sent on CORS responses to callers with no allowlisted
       Origin.
+    * ``server_max_body_bytes`` -- reject request bodies larger than
+      this with HTTP 413 before they are parsed. Unset means no
+      limit beyond the gateway's own; set it only if no tool takes
+      large arguments (an inline GeoJSON polygon can be big).
     * ``server_mcp_paths`` -- the request paths served as MCP routes.
       A deployment exposing a second route on the same handler (for
       example one that API Gateway guards with an API key) lists it
@@ -148,7 +152,8 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         Dict with ``allowed_origins`` (frozenset), ``default_cors_origin``
-        (str) and ``mcp_paths`` (tuple, in configured order)
+        (str), ``mcp_paths`` (tuple, in configured order) and
+        ``max_body_bytes`` (int or None)
 
     Raises:
         ConfigurationError: If either key is present but malformed
@@ -181,7 +186,19 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
                     f"got {path!r}"
                 )
 
+    max_body_bytes = config.get("server_max_body_bytes")
+    if max_body_bytes is not None and (
+        isinstance(max_body_bytes, bool)
+        or not isinstance(max_body_bytes, int)
+        or max_body_bytes <= 0
+    ):
+        raise ConfigurationError(
+            "'server_max_body_bytes' must be a positive integer, "
+            f"got {max_body_bytes!r}"
+        )
+
     return {
+        "max_body_bytes": max_body_bytes,
         "allowed_origins": frozenset(origins),
         "default_cors_origin": origins[0],
         "mcp_paths": tuple(dict.fromkeys(paths)),

@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.2.0
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.3.0
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -72,6 +72,7 @@ The converted Boston deployment's `scripts/deploy.sh` shows both paths.
 | `server_name`, `server_version`, `server_website_url` | `OpenContext`, `1.0.0`, none | `serverInfo` |
 | `instructions` | the plugin's `get_instructions()`, else none | MCP `instructions` text; config wins over the plugin |
 | `server_mcp_paths` | `["/mcp"]` | Request paths served as MCP routes |
+| `server_max_body_bytes` | no limit | Reject larger request bodies with HTTP 413 before parsing. Leave unset if any tool takes large arguments |
 | `server_allowed_origins` | claude.ai, claude.com, console.anthropic.com, MCP Inspector on localhost | The complete browser-origin allowlist; the first entry is the default CORS origin |
 
 Exactly one plugin must be enabled under `plugins:`.
@@ -85,6 +86,13 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.3.0** — hardening brought over from the eBird deployment. An
+internal error (`-32603`) no longer sends the exception text to the
+client: `data` is `Error ID: <id>`, and the full exception is logged
+under that ID. The HTTP handler treats header names
+case-insensitively and a missing body as empty. New optional
+`server_max_body_bytes`.
 
 **1.2.0** — `initialize` with a protocol version the server does not
 implement is answered with the newest legacy revision it does

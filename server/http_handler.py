@@ -204,6 +204,7 @@ class UniversalHTTPHandler:
                 "allowed_origins": cls.ALLOWED_ORIGINS,
                 "default_cors_origin": cls.DEFAULT_CORS_ORIGIN,
                 "mcp_paths": tuple(cls.MCP_PATHS),
+                "max_body_bytes": None,
             }
 
     @classmethod
@@ -286,6 +287,18 @@ class UniversalHTTPHandler:
         """
         start_time = time.perf_counter()
         request_id = request_id or "unknown"
+
+        # HTTP header names are case-insensitive and adapters differ in
+        # what they pass along, so normalise once here; every lookup
+        # below uses lower-case names. A missing body (API Gateway
+        # sends `"body": null` for an empty POST) is an empty one.
+        headers = (
+            {str(k).lower(): v for k, v in headers.items()}
+            if headers
+            else {}
+        )
+        if body is None:
+            body = ""
 
         # Pull incoming MCP session ID (sent by clients on every request after
         # the initial handshake). For `initialize` itself we generate one below.
@@ -386,6 +399,39 @@ class UniversalHTTPHandler:
                 error_headers,
                 error_body,
             )
+
+        # Refuse an oversized body before parsing it, when the
+        # deployment sets a limit (`server_max_body_bytes`).
+        max_body_bytes = self._http_settings()["max_body_bytes"]
+        if max_body_bytes is not None:
+            body_bytes = len(body.encode("utf-8", errors="replace"))
+            if body_bytes > max_body_bytes:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                error_body = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32600,
+                            "message": "Request body too large",
+                            "data": f"Limit: {max_body_bytes} bytes",
+                        },
+                    }
+                )
+                logger.warning(
+                    "413 error: request body too large",
+                    extra={
+                        "request_id": request_id,
+                        "request_path": path,
+                        "http_method": method,
+                        "body_bytes": body_bytes,
+                        "max_body_bytes": max_body_bytes,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                error_headers = {"Content-Type": "application/json"}
+                error_headers.update(self._get_cors_headers(request_origin))
+                return (413, error_headers, error_body)
 
         # Parse JSON once up front: to echo the JSON-RPC id on transport-level
         # errors (the spec's UnsupportedProtocolVersionError example carries

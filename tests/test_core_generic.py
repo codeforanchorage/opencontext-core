@@ -401,3 +401,111 @@ class TestConfigSources:
             ).encode("utf-8")
         )
         assert load_and_validate_config(str(cfg))["instructions"] == text
+
+
+class TestInternalErrorsAreScrubbed:
+    @staticmethod
+    def _server(exc):
+        manager = MagicMock(spec=PluginManager)
+        manager.config = {}
+        manager.get_instructions.return_value = None
+        manager.execute_tool = AsyncMock(side_effect=exc)
+        return MCPServer(manager)
+
+    CALL = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "stub__echo", "arguments": {}},
+    }
+
+    @pytest.mark.asyncio
+    async def test_fault_text_never_reaches_the_client(self, caplog):
+        server = self._server(RuntimeError("secret /path/detail"))
+        with caplog.at_level(logging.ERROR, logger="core.mcp_server"):
+            response = await server.handle_request(dict(self.CALL))
+
+        error = response["error"]
+        assert error["code"] == -32603
+        assert error["message"] == "Internal error"
+        assert error["data"].startswith("Error ID: ")
+        assert "secret" not in json.dumps(response)
+
+        # The same ID is in the log, with the real exception and traceback.
+        error_id = error["data"].removeprefix("Error ID: ")
+        records = [r for r in caplog.records if getattr(r, "error_id", None)]
+        assert [r.error_id for r in records] == [error_id]
+        assert "secret /path/detail" in records[0].getMessage()
+        assert records[0].exc_info is not None
+
+    @pytest.mark.asyncio
+    async def test_caller_errors_keep_their_data_and_get_no_error_id(self):
+        from core.interfaces import UnknownToolError
+
+        server = self._server(UnknownToolError("stub__nope", "stub__echo"))
+        response = await server.handle_request(dict(self.CALL))
+        assert response["error"]["code"] == -32602
+        assert "Error ID" not in response["error"]["data"]
+        assert "stub__echo" in response["error"]["data"]
+
+
+class TestHandlerHardening:
+    @staticmethod
+    async def _post(headers=None, body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})):
+        handler = UniversalHTTPHandler()
+        with (
+            patch("server.http_handler._initialize_server"),
+            patch("server.http_handler._mcp_server") as mock_server,
+        ):
+            mock_server.handle_http_request = AsyncMock(
+                return_value={"statusCode": 200, "headers": {}, "body": "{}"}
+            )
+            result = await handler.handle_request(
+                method="POST", path="/mcp", body=body, headers=headers or {}
+            )
+            return result, mock_server.handle_http_request
+
+    @pytest.mark.asyncio
+    async def test_header_names_are_case_insensitive(self):
+        http_handler._config = dict(BASE_CONFIG)
+        (status, _, _), _ = await self._post({"Origin": "https://evil.example"})
+        assert status == 403
+        (status, headers, _), _ = await self._post({"ORIGIN": "https://claude.com"})
+        assert status == 200
+        assert headers["Access-Control-Allow-Origin"] == "https://claude.com"
+        (status, _, body), _ = await self._post(
+            {"MCP-Protocol-Version": "1999-01-01"}
+        )
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32022
+
+    @pytest.mark.asyncio
+    async def test_missing_body_is_treated_as_empty(self):
+        http_handler._config = dict(BASE_CONFIG)
+        (status, _, _), forwarded = await self._post(body=None)
+        assert status == 200
+        assert forwarded.await_args.args[0] == ""
+
+    @pytest.mark.asyncio
+    async def test_no_body_limit_by_default(self):
+        http_handler._config = dict(BASE_CONFIG)
+        big = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "x" * 200_000})
+        (status, _, _), _ = await self._post(body=big)
+        assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_configured_body_limit_is_413_before_parsing(self):
+        http_handler._config = {**BASE_CONFIG, "server_max_body_bytes": 1000}
+        (status, _, body), forwarded = await self._post(body="x" * 1001)
+        assert status == 413
+        error = json.loads(body)["error"]
+        assert error["code"] == -32600
+        assert error["data"] == "Limit: 1000 bytes"
+        forwarded.assert_not_called()
+        (status, _, _), _ = await self._post(body="x" * 1000)
+        assert status != 413
+
+    @pytest.mark.parametrize("bad", [0, -1, "64kb", 1.5, True])
+    def test_malformed_body_limit_is_rejected(self, bad):
+        with pytest.raises(ConfigurationError):
+            get_http_settings({**BASE_CONFIG, "server_max_body_bytes": bad})
