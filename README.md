@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.0.0
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.1.0
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -75,6 +75,25 @@ The converted Boston deployment's `scripts/deploy.sh` shows both paths.
 | `server_allowed_origins` | claude.ai, claude.com, console.anthropic.com, MCP Inspector on localhost | The complete browser-origin allowlist; the first entry is the default CORS origin |
 
 Exactly one plugin must be enabled under `plugins:`.
+
+### Environment
+
+`OPENCONTEXT_CONFIG` may hold the config as serialized JSON (what
+infrastructure sets when the config is small enough for an
+environment variable) or a path to a YAML file (convenient locally).
+When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
+the current directory.
+
+## Changes
+
+**1.1.0** — brought over from the Living Atlas deployment, plus one
+fix. `tools/call` treats `arguments: null` as no arguments, and
+rejects a non-object `params` by name. The request log line carries
+`mcp_protocol_version` and `mcp_protocol_version_assumed`.
+`OPENCONTEXT_CONFIG` may be a YAML file path. `config.yaml` is read
+as UTF-8 on every platform.
+
+**1.0.0** — extracted from the Anchorage GIS deployment.
 
 ## Development
 

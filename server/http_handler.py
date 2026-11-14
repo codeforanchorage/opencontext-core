@@ -87,6 +87,16 @@ def _load_config() -> Dict[str, Any]:
             logger.info("Loaded configuration from environment variable")
             return _config
         except json.JSONDecodeError as e:
+            # Not JSON: accept a PATH to a YAML file too. Infrastructure
+            # sets this variable to serialized JSON, while local runs
+            # naturally point it at a file; taking both lets local dev
+            # go through this same handler, checks and all.
+            if os.path.isfile(config_json):
+                _config = load_and_validate_config(config_json)
+                logger.info(
+                    "Loaded configuration from OPENCONTEXT_CONFIG file path"
+                )
+                return _config
             logger.error(f"Failed to parse config from environment: {e}")
             raise
 
@@ -162,6 +172,13 @@ class UniversalHTTPHandler:
     # gateway guards with an API key); authentication is the gateway's
     # concern, so the handler only needs to accept the path.
     MCP_PATHS = DEFAULT_MCP_PATHS
+
+    # Spec (transports, Protocol Version Header): with no
+    # MCP-Protocol-Version header and no other way to identify the
+    # version, a server SHOULD assume 2025-03-26. An absent header is
+    # therefore not an error; the assumption only shapes logging, but
+    # it has to be the spec's so analysis of older clients is honest.
+    ASSUMED_PROTOCOL_VERSION = "2025-03-26"
 
     def __init__(self) -> None:
         """Initialize the universal HTTP handler."""
@@ -479,6 +496,13 @@ class UniversalHTTPHandler:
         )
         if effective_session_id:
             request_log_data["mcp_session_id"] = effective_session_id
+        # Declared vs assumed, so a log search can tell them apart.
+        request_log_data["mcp_protocol_version"] = (
+            declared_version or self.ASSUMED_PROTOCOL_VERSION
+        )
+        request_log_data["mcp_protocol_version_assumed"] = (
+            not declared_version
+        )
         logger.info("Incoming HTTP request", extra=request_log_data)
 
         try:

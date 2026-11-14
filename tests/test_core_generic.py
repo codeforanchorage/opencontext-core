@@ -330,3 +330,74 @@ class TestCallerErrorLogging:
         assert recs
         assert all(r.levelno == logging.WARNING for r in recs)
         assert all(r.exc_info is None for r in recs)
+
+
+class TestProtocolVersionLogging:
+    @staticmethod
+    async def _incoming_log(headers):
+        handler = UniversalHTTPHandler()
+        with (
+            patch("server.http_handler._initialize_server"),
+            patch("server.http_handler._mcp_server") as mock_server,
+            patch.object(http_handler.logger, "info") as info,
+        ):
+            mock_server.handle_http_request = AsyncMock(
+                return_value={"statusCode": 200, "headers": {}, "body": "{}"}
+            )
+            status, _, _ = await handler.handle_request(
+                method="POST",
+                path="/mcp",
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+                headers=headers,
+            )
+        assert status == 200
+        return next(
+            call.kwargs["extra"]
+            for call in info.call_args_list
+            if call.args and call.args[0] == "Incoming HTTP request"
+        )
+
+    @pytest.mark.asyncio
+    async def test_absent_version_is_logged_as_assumed(self):
+        http_handler._config = dict(BASE_CONFIG)
+        extra = await self._incoming_log({})
+        assert extra["mcp_protocol_version"] == "2025-03-26"
+        assert extra["mcp_protocol_version_assumed"] is True
+
+    @pytest.mark.asyncio
+    async def test_declared_version_is_logged_as_declared(self):
+        http_handler._config = dict(BASE_CONFIG)
+        extra = await self._incoming_log({"mcp-protocol-version": "2025-06-18"})
+        assert extra["mcp_protocol_version"] == "2025-06-18"
+        assert extra["mcp_protocol_version_assumed"] is False
+
+
+class TestConfigSources:
+    def test_opencontext_config_may_be_a_yaml_path(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "server_name: Local\nplugins:\n  stub:\n    enabled: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENCONTEXT_CONFIG", str(cfg))
+        http_handler._config = None
+        assert http_handler._load_config()["server_name"] == "Local"
+
+    def test_opencontext_config_that_is_neither_json_nor_a_file_raises(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("OPENCONTEXT_CONFIG", "{not json and not a path")
+        http_handler._config = None
+        with pytest.raises(json.JSONDecodeError):
+            http_handler._load_config()
+
+    def test_config_is_read_as_utf8(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        text = "em dash \u2014 and caf\u00e9"
+        cfg.write_bytes(
+            (
+                f"instructions: \"{text}\"\nplugins:\n  stub:\n"
+                "    enabled: true\n"
+            ).encode("utf-8")
+        )
+        assert load_and_validate_config(str(cfg))["instructions"] == text

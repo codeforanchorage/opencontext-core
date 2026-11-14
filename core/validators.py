@@ -202,7 +202,10 @@ def load_and_validate_config(config_path: str = "config.yaml") -> Dict[str, Any]
         FileNotFoundError: If config file doesn't exist
     """
     try:
-        with open(config_path, "r") as f:
+        # UTF-8 explicitly: the platform default on Windows is a legacy
+        # codepage, which silently garbles any non-ASCII text (an em
+        # dash in `instructions`, say) in local runs.
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
     except FileNotFoundError:
         raise FileNotFoundError(

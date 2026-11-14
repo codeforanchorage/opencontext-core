@@ -211,9 +211,8 @@ class MCPServer:
         start_time = time.perf_counter()
         request_id = request.get("id")
         method = request.get("method")
-        params = request.get("params", {})
-        if not isinstance(params, dict):
-            params = {}
+        raw_params = request.get("params", {})
+        params = raw_params if isinstance(raw_params, dict) else {}
         if era is None:
             era = self.request_era(request)
         meta = self._request_meta(request)
@@ -263,6 +262,16 @@ class MCPServer:
 
         http_status = 200
         try:
+            # A tools/call whose `params` is not an object never
+            # described a call at all. Say so by name, rather than
+            # treating it as empty and reporting a missing tool name.
+            if method == "tools/call" and not isinstance(
+                raw_params, (dict, type(None))
+            ):
+                raise InvalidToolParamsError(
+                    "Parameter 'params' must be an object, got "
+                    f"{type(raw_params).__name__}"
+                )
             if era == ERA_MODERN:
                 result = await self._dispatch_modern(
                     method, params, meta, is_notification
@@ -588,7 +597,11 @@ class MCPServer:
             Tool execution result
         """
         tool_name = params.get("name")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments")
+        if arguments is None:
+            # Omitted and explicit null both mean "no arguments":
+            # some clients serialise an empty argument set as null.
+            arguments = {}
 
         # Validate the request shape before dispatch. Both of these are
         # malformed CallToolRequests, not server faults: without this,
