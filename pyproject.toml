@@ -1,0 +1,51 @@
+[project]
+name = "opencontext-core"
+version = "1.0.0"
+description = "Shared MCP server core for OpenContext deployments: JSON-RPC handling (legacy and 2026-07-28 eras), the HTTP handler, the AWS Lambda adapter and the plugin interfaces."
+license = {text = "MIT"}
+readme = "README.md"
+# 3.11 is the floor because deployments still run the python3.11 Lambda
+# runtime; the suite is run on 3.11 and on the newest runtime in use.
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0",
+    # core/logging_utils.py imports pythonjsonlogger.json, added in 3.1.
+    "python-json-logger>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Repository = "https://github.com/codeforanchorage/opencontext-core"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# The import names stay `core` and `server` on purpose: every plugin
+# imports `core.interfaces`, and every deployment's Lambda handler string
+# is `server.adapters.aws_lambda.lambda_handler`. Keeping them means a
+# deployment switches from vendored copies to this package without
+# touching plugin code or infrastructure.
+[tool.setuptools.packages.find]
+include = ["core*", "server*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+# The rule set the code was written against. Stated explicitly so a newer
+# ruff with broader defaults does not turn into a thousand-line restyle.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
