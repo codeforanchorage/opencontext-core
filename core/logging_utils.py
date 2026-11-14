@@ -199,7 +199,19 @@ def _is_sensitive_key(key: str) -> bool:
     return any(sensitive_key in key_lower for sensitive_key in SENSITIVE_KEYS)
 
 
-def sanitize_dict(data: Any, sensitive_keys: Optional[List[str]] = None) -> Any:
+# How deep sanitize_dict follows nested containers. Real MCP requests
+# are a handful of levels deep; a caller can send thousands, and the
+# sanitizer recurses once per level. Past the cap the value is replaced
+# by a marker in the LOG ONLY -- the request itself is untouched.
+MAX_SANITIZE_DEPTH = 32
+TRUNCATED_MARKER = "[TRUNCATED: nested too deep to log]"
+
+
+def sanitize_dict(
+    data: Any,
+    sensitive_keys: Optional[List[str]] = None,
+    _depth: int = 0,
+) -> Any:
     """Recursively sanitize dictionary values for sensitive keys.
 
     Preserves structure but replaces sensitive values with [REDACTED].
@@ -214,21 +226,29 @@ def sanitize_dict(data: Any, sensitive_keys: Optional[List[str]] = None) -> Any:
     if sensitive_keys is None:
         sensitive_keys = SENSITIVE_KEYS
 
+    if _depth >= MAX_SANITIZE_DEPTH and isinstance(data, (dict, list)):
+        return TRUNCATED_MARKER
+
     if isinstance(data, dict):
         sanitized = {}
         for key, value in data.items():
             # Check if key is sensitive
-            if _is_sensitive_key(key) or (
+            name = key if isinstance(key, str) else str(key)
+            if _is_sensitive_key(name) or (
                 sensitive_keys
-                and any(sk.lower() in key.lower() for sk in sensitive_keys)
+                and any(sk.lower() in name.lower() for sk in sensitive_keys)
             ):
                 sanitized[key] = "[REDACTED]"
             else:
                 # Recursively sanitize nested structures
-                sanitized[key] = sanitize_dict(value, sensitive_keys)
+                sanitized[key] = sanitize_dict(
+                    value, sensitive_keys, _depth + 1
+                )
         return sanitized
     elif isinstance(data, list):
-        return [sanitize_dict(item, sensitive_keys) for item in data]
+        return [
+            sanitize_dict(item, sensitive_keys, _depth + 1) for item in data
+        ]
     else:
         # Primitive types (str, int, float, bool, None) - return as-is
         return data
@@ -268,9 +288,12 @@ def sanitize_request_body(body: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(body) if body else {}
         return sanitize_dict(parsed)
-    except (json.JSONDecodeError, TypeError):
-        # If parsing fails, return sanitized string representation
-        return {"raw_body": "[REDACTED]" if len(body) > 0 else ""}
+    except Exception:
+        # Logging must never be what fails a request. Whatever is wrong
+        # with the body (not JSON, not an object, nested deeper than the
+        # parser or the sanitizer will recurse), log a placeholder and
+        # let the request handling answer the caller properly.
+        return {"raw_body": "[REDACTED]" if body else ""}
 
 
 def sanitize_response_body(body: str) -> Dict[str, Any]:
@@ -285,9 +308,12 @@ def sanitize_response_body(body: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(body) if body else {}
         return sanitize_dict(parsed)
-    except (json.JSONDecodeError, TypeError):
-        # If parsing fails, return sanitized string representation
-        return {"raw_body": "[REDACTED]" if len(body) > 0 else ""}
+    except Exception:
+        # Logging must never be what fails a request. Whatever is wrong
+        # with the body (not JSON, not an object, nested deeper than the
+        # parser or the sanitizer will recurse), log a placeholder and
+        # let the request handling answer the caller properly.
+        return {"raw_body": "[REDACTED]" if body else ""}
 
 
 def format_request_log(

@@ -37,12 +37,19 @@ def reset_http_handler_globals():
     saved_plugin_manager = http_handler._plugin_manager
     saved_mcp_server = http_handler._mcp_server
     saved_config = http_handler._config
+    # The Lambda adapter caches its handler the same way, and tests
+    # replace it with mocks; one left behind makes a later test that
+    # goes through the real lambda_handler fail depending on run order.
+    from server.adapters import aws_lambda
+
+    saved_lambda_handler = aws_lambda._handler
     try:
         yield
     finally:
         http_handler._plugin_manager = saved_plugin_manager
         http_handler._mcp_server = saved_mcp_server
         http_handler._config = saved_config
+        aws_lambda._handler = saved_lambda_handler
 
 
 FIXTURE_DEPLOYMENT = Path(__file__).parent / "fixtures" / "deployment"

@@ -417,6 +417,13 @@ class MCPServer:
         is_notification: bool,
     ) -> Optional[Dict[str, Any]]:
         """Route a legacy-era request. Returns None for notifications."""
+        if is_notification:
+            # A notification gets no response, so there is nobody to
+            # return a result to: nothing is executed for one, whatever
+            # method it names (the modern era drops them the same way).
+            if method != "notifications/initialized":
+                logger.warning(f"Ignoring notification for method: {method}")
+            return None
         if method == "initialize":
             return await self._handle_initialize(params)
         if method == "tools/list":
@@ -428,11 +435,9 @@ class MCPServer:
             # liveness signal is the response itself, not its body.
             return {}
         if method == "notifications/initialized":
-            # MCP notification - no response needed
-            return None
-        if is_notification:
-            # For notifications with unknown methods, silently ignore
-            logger.warning(f"Ignoring unknown notification method: {method}")
+            # Sent with an id by some clients, though it is a
+            # notification. Accepted with no result, as it always was:
+            # an error here would fail the client's handshake.
             return None
         raise MethodNotFoundError(f"Unknown method: {method}")
 
@@ -760,15 +765,22 @@ class MCPServer:
         headers = headers or {}
         try:
             request = json.loads(body)
-        except json.JSONDecodeError as e:
-            # A malformed body is the caller's mistake. -32700 already
-            # tells them exactly that; our own parse traceback adds
-            # nothing and reads as a server fault.
+        except (ValueError, RecursionError, TypeError) as e:
+            # A body that will not parse is the caller's mistake. -32700
+            # already tells them exactly that; our own parse traceback
+            # adds nothing and reads as a server fault. ValueError covers
+            # JSONDecodeError and undecodable bytes; RecursionError is a
+            # body nested deeper than the parser will go.
             logger.warning(
-                f"Invalid JSON in request body: {e}",
-                extra={"error_type": "JSONDecodeError"},
+                f"Invalid JSON in request body: {type(e).__name__}",
+                extra={"error_type": type(e).__name__},
             )
-            return self._http_error(400, None, -32700, "Parse error", str(e))
+            detail = (
+                str(e)
+                if isinstance(e, json.JSONDecodeError)
+                else "Request body is not valid JSON"
+            )
+            return self._http_error(400, None, -32700, "Parse error", detail)
         if not isinstance(request, dict):
             return self._http_error(
                 400, None, -32600, "Invalid Request",

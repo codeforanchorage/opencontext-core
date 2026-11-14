@@ -9,6 +9,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple
 
 from core.logging_utils import (
@@ -25,7 +26,45 @@ from core.validators import (
     get_http_settings,
     get_logging_config,
     load_and_validate_config,
+    validate_config,
 )
+
+# What a request body that cannot be decoded as UTF-8 is replaced with.
+# It is not valid JSON, so the request is refused with 400 / -32700 like
+# any other unparseable body and nothing downstream runs on corrupted
+# text. Written as an escape so it cannot be mangled by a re-encoding.
+UNDECODABLE_BODY = "\x00"
+
+
+def normalize_headers(headers: Any) -> Dict[str, str]:
+    """Request headers as a plain ``{lower-case name: str value}`` dict.
+
+    The one place header shapes are normalised, used by the handler and
+    by every adapter, so they cannot disagree about what a request's
+    Origin is. HTTP header names are case-insensitive and event sources
+    differ in how they present them. Anything that is not a mapping is
+    treated as no headers; ``None`` values are dropped; a non-string
+    value is stringified (so a list-valued Origin matches nothing on the
+    allowlist and is refused, rather than raising). If two keys differ
+    only by case the later one wins.
+    """
+    # Any mapping, not only a dict: an adapter may hand over a read-only
+    # proxy or an email/http message object. Dropping those would drop the
+    # Origin header with them, and a request with no Origin is allowed.
+    if isinstance(headers, Mapping):
+        items = headers.items()
+    elif callable(getattr(headers, "items", None)):
+        try:
+            items = list(headers.items())
+        except Exception:
+            return {}
+    else:
+        return {}
+    return {
+        str(key).lower(): value if isinstance(value, str) else str(value)
+        for key, value in items
+        if value is not None
+    }
 
 
 def _packaged_config_path() -> str:
@@ -83,7 +122,12 @@ def _load_config() -> Dict[str, Any]:
     config_json = os.environ.get("OPENCONTEXT_CONFIG")
     if config_json:
         try:
-            _config = json.loads(config_json)
+            loaded = json.loads(config_json)
+            # The same validation a YAML file gets. Without it a malformed
+            # `server_*` setting was silently replaced by the defaults;
+            # now it stops the server, as it does from a file.
+            validate_config(loaded)
+            _config = loaded
             logger.info("Loaded configuration from environment variable")
             return _config
         except json.JSONDecodeError as e:
@@ -194,8 +238,10 @@ class UniversalHTTPHandler:
         loaded must not turn an Origin refusal or a 404 into a crash: in
         that case the class defaults apply, and the request goes on to
         fail with the usual 500 when initialization hits the same error.
-        A config that loads but carries malformed settings never gets
-        this far -- load_and_validate_config rejects it.
+        That includes a config whose `server_*` settings are malformed:
+        _load_config rejects it whether it came from a file or from the
+        OPENCONTEXT_CONFIG variable, so the defaults used here are never
+        what a request is actually served under.
         """
         try:
             return get_http_settings(_load_config())
@@ -292,13 +338,34 @@ class UniversalHTTPHandler:
         # what they pass along, so normalise once here; every lookup
         # below uses lower-case names. A missing body (API Gateway
         # sends `"body": null` for an empty POST) is an empty one.
-        headers = (
-            {str(k).lower(): v for k, v in headers.items()}
-            if headers
-            else {}
-        )
+        # Anything that is not a plain mapping of strings is coerced, so
+        # an odd event shape becomes an ordinary refusal further down
+        # rather than an exception here, outside the try below.
+        headers = normalize_headers(headers)
+        # Size as received, when the body arrived as bytes: the limit
+        # below is on what was sent, not on a re-encoding of it.
+        received_bytes: Optional[int] = None
         if body is None:
             body = ""
+        elif isinstance(body, (bytes, bytearray, memoryview)):
+            raw = bytes(body)
+            received_bytes = len(raw)
+            try:
+                body = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # Decoding leniently would let a request run on silently
+                # corrupted text. Refuse it as unparseable instead.
+                body = UNDECODABLE_BODY
+        elif isinstance(body, (dict, list)):
+            # An adapter that already parsed the body: put it back as
+            # JSON. If it holds something JSON cannot express it was
+            # never a JSON request; refuse it like any unparseable body.
+            try:
+                body = json.dumps(body)
+            except (TypeError, ValueError, RecursionError):
+                body = UNDECODABLE_BODY
+        elif not isinstance(body, str):
+            body = str(body)
 
         # Pull incoming MCP session ID (sent by clients on every request after
         # the initial handshake). For `initialize` itself we generate one below.
@@ -339,7 +406,6 @@ class UniversalHTTPHandler:
         # Validate path - must be an MCP route
         mcp_paths = self._http_settings()["mcp_paths"]
         if path not in mcp_paths:
-            expected = " or ".join(f"'{p}'" for p in mcp_paths)
             duration_ms = (time.perf_counter() - start_time) * 1000
             error_body = json.dumps(
                 {
@@ -348,7 +414,10 @@ class UniversalHTTPHandler:
                     "error": {
                         "code": -32601,
                         "message": "Not Found",
-                        "data": f"Path '{path}' not found. Expected {expected}",
+                        # The routes this deployment serves are not
+                        # listed: an anonymous probe has no need to
+                        # learn of a second, access-controlled one.
+                        "data": f"Path '{path}' not found",
                     },
                 }
             )
@@ -404,7 +473,11 @@ class UniversalHTTPHandler:
         # deployment sets a limit (`server_max_body_bytes`).
         max_body_bytes = self._http_settings()["max_body_bytes"]
         if max_body_bytes is not None:
-            body_bytes = len(body.encode("utf-8", errors="replace"))
+            body_bytes = (
+                received_bytes
+                if received_bytes is not None
+                else len(body.encode("utf-8", errors="replace"))
+            )
             if body_bytes > max_body_bytes:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 error_body = json.dumps(
@@ -450,7 +523,9 @@ class UniversalHTTPHandler:
             is_modern = (
                 MCPServer.request_era(request_json, headers) == ERA_MODERN
             )
-        except (json.JSONDecodeError, AttributeError):
+        except (ValueError, AttributeError, TypeError, RecursionError):
+            # Unparseable, not an object, or nested too deep to parse:
+            # leave it for handle_http_request to answer with -32700.
             is_initialize = False
             is_modern = False
 

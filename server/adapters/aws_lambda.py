@@ -10,7 +10,11 @@ import json
 import logging
 from typing import Any, Dict, Optional, Protocol
 
-from server.http_handler import UniversalHTTPHandler
+from server.http_handler import (
+    UNDECODABLE_BODY,
+    UniversalHTTPHandler,
+    normalize_headers,
+)
 
 
 class LambdaContext(Protocol):
@@ -92,15 +96,18 @@ def lambda_handler(
             or event.get("path", "/")
         )
 
+        # Headers, normalised by the handler's own function so the
+        # preflight, the request and the error path all read a request's
+        # Origin the same way (HTTP header names are case-insensitive, and
+        # Function URL and API Gateway events present them differently).
+        request_headers = normalize_headers(event.get("headers"))
+
         # Handle OPTIONS requests for CORS preflight
         if http_method == "OPTIONS":
             handler = get_handler()
-            preflight_origin = (event.get("headers") or {}).get(
-                "origin"
-            ) or (event.get("headers") or {}).get("Origin")
             status_code, headers, body = handler.handle_options(
                 request_id=request_id,
-                request_origin=preflight_origin,
+                request_origin=request_headers.get("origin"),
             )
 
             logger.info(
@@ -125,29 +132,32 @@ def lambda_handler(
 
         # Handle base64-encoded bodies from API Gateway
         if event.get("isBase64Encoded", False):
+            # Hand the handler the decoded BYTES: it measures the size
+            # limit on them and decodes them strictly, refusing anything
+            # that is not UTF-8. A body that is not valid base64 at all is
+            # the caller's mistake too, so it becomes the same
+            # unparseable marker (400 / -32700), not a 500 from here.
+            # Whitespace is removed first: a hand-built or MIME-wrapped
+            # event may carry newlines, which strict decoding rejects and
+            # which were tolerated before decoding became strict.
             try:
-                body = base64.b64decode(body).decode("utf-8")
+                if isinstance(body, str):
+                    body = "".join(body.split())
+                body = base64.b64decode(body, validate=True)
             except Exception as e:
-                logger.error(
-                    f"Failed to decode base64 body: {e}",
+                logger.warning(
+                    f"Undecodable base64 body: {type(e).__name__}",
                     extra={"request_id": request_id},
                 )
-                raise ValueError(f"Invalid base64-encoded body: {e}") from e
+                body = UNDECODABLE_BODY
 
-        if isinstance(body, dict):
+        # A direct invoke can carry an already-parsed body. The handler
+        # accepts that too; converting here keeps what it receives a
+        # string, which is what this adapter has always passed.
+        if isinstance(body, (dict, list)):
             body = json.dumps(body)
 
-        # Extract headers
-        headers = event.get("headers", {})
-        if isinstance(headers, dict):
-            # Convert header keys to lowercase for HTTP/1.1 compliance.
-            # HTTP/1.1 header field names are case-insensitive, and normalizing
-            # to lowercase ensures consistent behavior across different Lambda
-            # event sources (Function URL vs API Gateway). This normalization
-            # is expected by UniversalHTTPHandler for reliable header access.
-            headers = {k.lower(): v for k, v in headers.items()}
-        else:
-            headers = {}
+        headers = request_headers
 
         # Get handler and process request
         handler = get_handler()
@@ -207,9 +217,10 @@ def lambda_handler(
         # Reflect Origin against the allowlist so even error responses
         # respect CORS scope. Browsers ignore mismatches; native clients
         # ignore CORS entirely.
-        error_origin = (event.get("headers") or {}).get(
-            "origin"
-        ) or (event.get("headers") or {}).get("Origin")
+        # This is the error path: assume nothing about the event's shape.
+        error_origin = normalize_headers(
+            event.get("headers") if isinstance(event, dict) else None
+        ).get("origin")
         # Don't leak exception details to the client; full traceback is in
         # CloudWatch via logger.error(..., exc_info=True) above.
         error_cors = UniversalHTTPHandler._get_cors_headers(error_origin)

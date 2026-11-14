@@ -147,7 +147,7 @@ class TestHandlerUsesConfiguredSettings:
         assert (await self._post("/mcp"))[0] == 200
         status, _, body = await self._post("/mcp-keyed")
         assert status == 404
-        assert json.loads(body)["error"]["data"].endswith("Expected '/mcp'")
+        assert json.loads(body)["error"]["code"] == -32601
 
     @pytest.mark.asyncio
     async def test_configured_extra_path_is_served(self):
@@ -158,7 +158,7 @@ class TestHandlerUsesConfiguredSettings:
         assert (await self._post("/mcp-keyed"))[0] == 200
         status, _, body = await self._post("/other")
         assert status == 404
-        assert "Expected '/mcp' or '/mcp-keyed'" in body
+        assert "/mcp-keyed" not in body  # routes are not advertised
 
     @pytest.mark.asyncio
     async def test_configured_origins_are_enforced(self):

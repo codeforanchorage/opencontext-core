@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.3.1
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.4.0
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -86,6 +86,29 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.4.0** — fixes from two independent code reviews of 1.3.1.
+
+- A tool that raises unexpectedly no longer has its exception text sent
+  to the client: the result says the tool failed and gives an `Error ID`,
+  and the exception is logged under that ID. `ToolInputError` (and the
+  core's own `InvalidToolParamsError` / `UnknownToolError`) still pass
+  their message through, because the plugin wrote it for the caller. A
+  plain `ValueError` is scrubbed; raise `ToolInputError` or return a
+  `ToolResult` for a message a model should see.
+- A config delivered as JSON in `OPENCONTEXT_CONFIG` gets the same
+  validation as a YAML file. A malformed `server_*` setting used to be
+  silently replaced by the defaults; now the server refuses to start.
+- Bodies a caller can use to provoke a 500 are refused with 400 /
+  `-32700`: nested too deep to parse, not UTF-8, not valid base64. A
+  non-UTF-8 body is never decoded leniently and run. Request logging
+  caps how deep it follows nested arguments (logs only).
+- One header normalisation (`server.http_handler.normalize_headers`) for
+  the handler and the Lambda adapter, accepting any mapping, so a
+  preflight and its request cannot disagree about the Origin.
+- A legacy-era notification (no `id`) no longer executes a tool.
+- The 404 for an unknown path no longer lists the configured routes.
+- `server_max_body_bytes` is measured on the bytes received.
 
 **1.3.1** — test-only: one test still asserted the pre-1.3.0 error text,
 so the v1.3.0 tag has a failing test. No code change. Pin this instead.

@@ -205,6 +205,27 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def validate_config(config: Any) -> Tuple[List[str], int]:
+    """Validate a parsed config, wherever it came from.
+
+    The single definition of a valid config, used for a YAML file and
+    for a config delivered as JSON in the OPENCONTEXT_CONFIG variable,
+    so the two cannot drift: structure, exactly one enabled plugin, and
+    well-formed optional HTTP settings. Failing here means failing at
+    load time, not on some later request.
+
+    Returns:
+        Tuple of (enabled_plugin_names, count)
+
+    Raises:
+        ConfigurationError: If any check fails
+    """
+    validate_config_structure(config)
+    enabled = validate_plugin_count(config)
+    get_http_settings(config)
+    return enabled
+
+
 def load_and_validate_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     """Load and validate configuration from YAML file.
 
@@ -236,14 +257,7 @@ def load_and_validate_config(config_path: str = "config.yaml") -> Dict[str, Any]
         raise ConfigurationError(f"Configuration file {config_path} is empty")
 
     # Validate structure
-    validate_config_structure(config)
-
-    # Validate plugin count (CRITICAL)
-    enabled_plugins, count = validate_plugin_count(config)
-
-    # Fail at load time, not on the first request, if the optional HTTP
-    # settings are malformed.
-    get_http_settings(config)
+    enabled_plugins, count = validate_config(config)
 
     logger.info(
         f"Configuration validated: {count} plugin(s) enabled: {', '.join(enabled_plugins)}"

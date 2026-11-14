@@ -9,10 +9,17 @@ import inspect
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.interfaces import MCPPlugin, ToolResult, UnknownToolError
+from core.interfaces import (
+    InvalidToolParamsError,
+    MCPPlugin,
+    ToolInputError,
+    ToolResult,
+    UnknownToolError,
+)
 from core.validators import ConfigurationError, get_enabled_plugin_config
 
 logger = logging.getLogger(__name__)
@@ -286,16 +293,45 @@ class PluginManager:
         try:
             result = await plugin.execute_tool(actual_tool_name, arguments)
             return result
-        except Exception as e:
-            logger.error(
-                f"Error executing tool {tool_name} in plugin {plugin_name}: {e}",
-                exc_info=True,
+        except (ToolInputError, InvalidToolParamsError, UnknownToolError) as e:
+            # The caller-error types: the plugin (or a helper it called)
+            # rejected the request and wrote the message for the caller.
+            # Pass it through so a model can correct the call. Not a
+            # fault, so no traceback.
+            logger.warning(
+                f"Tool {tool_name} rejected its arguments: {e}",
+                extra={"error_type": type(e).__name__},
             )
-            error_msg = str(e) if str(e) else "Tool execution failed"
             return ToolResult(
                 content=[],
                 success=False,
-                error_message=error_msg,
+                error_message=str(e) or "Invalid tool arguments",
+            )
+        except Exception as e:
+            # Anything else escaping a plugin is a fault nobody wrote for
+            # a client to read: its text can carry file paths, library
+            # internals or fragments of an upstream response. The client
+            # gets a correlation ID; the exception is logged under it.
+            # That deliberately includes plain ValueError: see
+            # ToolInputError in core/interfaces.py for why a caller
+            # mistake is never inferred from ValueError alone. A plugin
+            # that wants a message shown returns a ToolResult itself or
+            # raises ToolInputError.
+            error_id = uuid.uuid4().hex
+            logger.error(
+                f"Error executing tool {tool_name} in plugin {plugin_name} "
+                f"[error_id={error_id}]: {e}",
+                extra={"error_id": error_id, "error_type": type(e).__name__},
+                exc_info=True,
+            )
+            return ToolResult(
+                content=[],
+                success=False,
+                # Says only what is known: it failed, and here is the ID.
+                # No guess at the cause -- a model repeats it to the user.
+                error_message=(
+                    f"The tool failed unexpectedly. Error ID: {error_id}"
+                ),
             )
 
     def get_instructions(self) -> Optional[str]:
