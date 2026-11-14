@@ -586,7 +586,7 @@ class TestWebsiteUrl:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "version", ["2025-06-18", "2025-03-26", "2024-11-05", "bogus"]
+        "version", ["2025-06-18", "2025-03-26", "2024-11-05", None]
     )
     async def test_older_revisions_omit_website_url(self, version):
         response = await _server(self._cfg()).handle_request(
@@ -596,6 +596,16 @@ class TestWebsiteUrl:
             "name": "Example MCP",
             "version": "1.0.0",
         }
+
+    @pytest.mark.asyncio
+    async def test_unimplemented_version_negotiates_newest_and_gets_url(self):
+        """An unknown version is answered with 2025-11-25, which defines
+        websiteUrl, so the field is sent."""
+        response = await _server(self._cfg()).handle_request(
+            self._initialize("bogus")
+        )
+        assert response["result"]["protocolVersion"] == "2025-11-25"
+        assert response["result"]["serverInfo"]["websiteUrl"] == self.URL
 
     @pytest.mark.asyncio
     async def test_unset_config_omits_website_url(self):

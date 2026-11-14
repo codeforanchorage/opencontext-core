@@ -56,13 +56,25 @@ class TestProtocolNegotiation:
         assert response["result"]["protocolVersion"] == version
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", ["2026-07-28", "1999-01-01", None])
-    async def test_unrecognised_or_modern_version_falls_back_to_default(self, version):
-        """2026-07-28 IS supported, but never on initialize: it drops the
-        handshake, and echoing it here would promise stateless semantics
-        on a session-based exchange (see tests/test_modern_protocol.py)."""
+    @pytest.mark.parametrize(
+        "version, answered",
+        [
+            ("2026-07-28", "2025-11-25"),
+            ("1999-01-01", "2025-11-25"),
+            (None, "2025-03-26"),
+        ],
+    )
+    async def test_unimplemented_version_gets_the_newest_legacy(
+        self, version, answered
+    ):
+        """A version we do not implement on initialize is answered with
+        the newest legacy revision we do (spec: "SHOULD be the latest
+        version supported by the server"). 2026-07-28 IS supported, but
+        never on initialize: it drops the handshake, and echoing it here
+        would promise stateless semantics on a session-based exchange.
+        A request naming no version gets the spec's assumed default."""
         response = await _server().handle_request(_initialize(version))
-        assert response["result"]["protocolVersion"] == "2025-03-26"
+        assert response["result"]["protocolVersion"] == answered
 
 
 class TestServerIdentity:

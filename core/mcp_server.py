@@ -111,6 +111,11 @@ class MCPServer:
     )
     # Spec-defined assumption for legacy HTTP clients that send no version.
     DEFAULT_PROTOCOL_VERSION = "2025-03-26"
+    # What `initialize` answers when the client asks for a version we do
+    # not implement. Spec (lifecycle, version negotiation): the server
+    # "MUST respond with another protocol version it supports. This SHOULD
+    # be the latest version supported by the server."
+    LATEST_LEGACY_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[0]
 
     # Cache hints on modern results (spec "CacheableResult"). The tool set
     # and server identity only change on redeploy, so both are safe to
@@ -424,8 +429,13 @@ class MCPServer:
         Only LEGACY revisions are negotiable here: ``initialize`` *is* the
         legacy handshake, so a client asking for 2026-07-28 on it is
         confused, and echoing that version back would promise stateless
-        semantics on a session-based exchange. It falls back to the
-        default like any other unrecognised version.
+        semantics on a session-based exchange. It is answered like any
+        other version we do not implement: with the newest legacy
+        revision we do, which the client may accept or disconnect on.
+
+        A request that names no version at all is a different case -- it
+        says nothing about what the client can speak -- and gets the
+        spec's assumed default, the conservative choice.
 
         Args:
             params: Initialize parameters
@@ -434,11 +444,12 @@ class MCPServer:
             Initialize response
         """
         requested_version = params.get("protocolVersion")
-        protocol_version = (
-            requested_version
-            if requested_version in self.LEGACY_PROTOCOL_VERSIONS
-            else self.DEFAULT_PROTOCOL_VERSION
-        )
+        if requested_version in self.LEGACY_PROTOCOL_VERSIONS:
+            protocol_version = requested_version
+        elif requested_version is None:
+            protocol_version = self.DEFAULT_PROTOCOL_VERSION
+        else:
+            protocol_version = self.LATEST_LEGACY_PROTOCOL_VERSION
 
         result: Dict[str, Any] = {
             "protocolVersion": protocol_version,

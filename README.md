@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.1.0
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.2.0
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -85,6 +85,11 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.2.0** — `initialize` with a protocol version the server does not
+implement is answered with the newest legacy revision it does
+(`2025-11-25`), as the spec recommends, instead of `2025-03-26`. A request
+naming no version still gets `2025-03-26`.
 
 **1.1.0** — brought over from the Living Atlas deployment, plus one
 fix. `tools/call` treats `arguments: null` as no arguments, and

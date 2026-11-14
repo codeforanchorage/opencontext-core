@@ -111,11 +111,12 @@ class TestInitialize:
             }
         )
 
-        assert response["result"]["protocolVersion"] == "2025-03-26"
+        assert response["result"]["protocolVersion"] == "2025-11-25"
 
     @pytest.mark.asyncio
     async def test_initialize_unsupported_version_falls_back(self):
-        """An unrecognized requested version falls back to the default."""
+        """An unrecognized requested version is answered with the newest
+        legacy revision the server implements."""
         plugin_manager = MagicMock(spec=PluginManager)
         plugin_manager.config = {}
         server = MCPServer(plugin_manager)
@@ -129,7 +130,7 @@ class TestInitialize:
 
         response = await server.handle_request(request)
 
-        assert response["result"]["protocolVersion"] == "2025-03-26"
+        assert response["result"]["protocolVersion"] == "2025-11-25"
 
     @pytest.mark.asyncio
     async def test_initialize_notification_returns_none(self):
