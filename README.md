@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.3.0
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.3.1
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -86,6 +86,9 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.3.1** — test-only: one test still asserted the pre-1.3.0 error text,
+so the v1.3.0 tag has a failing test. No code change. Pin this instead.
 
 **1.3.0** — hardening brought over from the eBird deployment. An
 internal error (`-32603`) no longer sends the exception text to the

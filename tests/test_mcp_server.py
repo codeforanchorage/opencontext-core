@@ -615,7 +615,8 @@ class TestErrorHandling:
         assert "error" in response
         assert response["error"]["code"] == -32603
         assert response["error"]["message"] == "Internal error"
-        assert "Internal error" in response["error"]["data"]
+        # The exception text stays in the log; the client gets an ID.
+        assert response["error"]["data"].startswith("Error ID: ")
 
     @pytest.mark.asyncio
     async def test_exception_in_notification_returns_none(self):
