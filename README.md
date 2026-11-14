@@ -37,6 +37,22 @@ into the deployment's environment:
 pip install -e ../opencontext-core
 ```
 
+### Packaging for Lambda
+
+Install the requirements into the package directory, then copy the
+deployment's own `plugins/` beside them. Do not copy `core/` or
+`server/`: the install puts them there.
+
+With `uv pip install --target ... --python-platform ... --python-version
+...` one step is enough. With plain `pip` it is not: pip will not build a
+package while `--platform`/`--python-version` are set, and a git-tag
+requirement has to be built. Install everything else with
+`--only-binary :all:` and the platform flags first, then this package on
+its own with `--no-deps` and no platform flags (it is pure Python). That
+means the deployment's `requirements.txt` must itself list this
+package's dependencies: `pydantic`, `PyYAML`, `python-json-logger>=3.1.0`.
+The converted Boston deployment's `scripts/deploy.sh` shows both paths.
+
 ### Where plugins are found
 
 `core.plugin_manager.plugin_root()` resolves, in order:
