@@ -151,7 +151,11 @@ not format-clean.
 ## Releasing
 
 Bump `version` in `pyproject.toml` and `__version__` in
-`core/__init__.py`, tag `vX.Y.Z`, push the tag. Nothing changes for any
+`core/__init__.py`, push `main`, and wait for the CI workflow to go green
+on that commit. Only then tag `vX.Y.Z` and push the tag. CI runs lint and
+the suite serially and in parallel on Python 3.11 and 3.14, and checks
+that the two version strings and the tag agree. (v1.3.0 was tagged with a
+failing test before this workflow existed.) Nothing changes for any
 deployment until it moves its pin.
 
 ## Origin
