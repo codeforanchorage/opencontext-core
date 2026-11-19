@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.4.0
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.4.1
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -86,6 +86,22 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.4.1** — hardening from a review of 1.4.0. No protocol change.
+
+- A response is always valid JSON. A NaN or Infinity in a tool result
+  was written as a bare token, which strict parsers reject, so the
+  client lost the whole response with HTTP 200; it is now `null`. A
+  value JSON cannot encode (a datetime) raised outside the request's
+  error handling and became a 500 with `id: null`; it is now its
+  string form, with the request id kept.
+- `tools/call` with a `name` that is not a string is -32602, not
+  -32603 with a traceback.
+- `logging.level` left empty or set to a number no longer crashes the
+  handler module at import.
+- An empty `server_name` / `server_version` falls back to the default
+  instead of sending `serverInfo.name: null`.
+- A Lambda event whose `requestContext` is null is served.
 
 **1.4.0** — fixes from two independent code reviews of 1.3.1.
 

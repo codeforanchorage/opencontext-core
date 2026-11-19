@@ -23,6 +23,7 @@ round trip every session used to start with.
 import base64
 import json
 import logging
+import math
 import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
@@ -33,6 +34,37 @@ from core.logging_utils import (
 )
 from core.interfaces import InvalidToolParamsError, UnknownToolError
 from core.plugin_manager import PluginManager
+
+
+def _json_safe(value: Any) -> Any:
+    """A copy of ``value`` with non-finite floats replaced by None."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def dumps_response(payload: Any) -> str:
+    """Serialise a JSON-RPC response so that it is always valid JSON.
+
+    ``json.dumps`` writes NaN and Infinity as bare tokens, which are not
+    JSON: a strict parser (JavaScript's JSON.parse) rejects the whole
+    body, so one NaN in a tool's structured result cost the client the
+    entire response, with HTTP 200. A value json cannot encode at all (a
+    datetime, a Decimal) raised outside the request's error handling and
+    became a 500 that had lost the request id.
+
+    Non-finite numbers become null and unencodable values their str().
+    The common case, a payload that is already clean, takes the first
+    branch and pays nothing extra.
+    """
+    try:
+        return json.dumps(payload, allow_nan=False)
+    except (TypeError, ValueError):
+        return json.dumps(_json_safe(payload), allow_nan=False, default=str)
 
 logger = logging.getLogger(__name__)
 
@@ -594,8 +626,10 @@ class MCPServer:
         """
         config = self.plugin_manager.config or {}
         info = {
-            "name": config.get("server_name", "OpenContext"),
-            "version": str(config.get("server_version", "1.0.0")),
+            # `or`, not a .get default: an empty `server_name:` in YAML
+            # is None, and serverInfo.name must be a string.
+            "name": str(config.get("server_name") or "OpenContext"),
+            "version": str(config.get("server_version") or "1.0.0"),
         }
         website_url = config.get("server_website_url")
         if website_url and (
@@ -645,6 +679,14 @@ class MCPServer:
         if not tool_name:
             raise InvalidToolParamsError(
                 "Missing required parameter 'name' (the tool to call)"
+            )
+        if not isinstance(tool_name, str):
+            # A list or object here is unhashable: looked up in the tool
+            # registry it raised TypeError, i.e. -32603 and a traceback
+            # at ERROR for what is a malformed request.
+            raise InvalidToolParamsError(
+                f"Parameter 'name' must be a string, got "
+                f"{type(tool_name).__name__}"
             )
         if not isinstance(arguments, dict):
             raise InvalidToolParamsError(
@@ -834,7 +876,7 @@ class MCPServer:
         return {
             "statusCode": status_code,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(response),
+            "body": dumps_response(response),
         }
 
     @staticmethod
@@ -851,7 +893,7 @@ class MCPServer:
         return {
             "statusCode": status,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(
+            "body": dumps_response(
                 {"jsonrpc": "2.0", "id": request_id, "error": error}
             ),
         }

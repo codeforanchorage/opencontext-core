@@ -59,7 +59,12 @@ def configure_json_logging(level: str = "INFO", pretty: bool = False) -> None:
     root_logger.handlers.clear()
 
     # Set log level
-    log_level = getattr(logging, level.upper(), logging.INFO)
+    # `logging.level:` left empty in YAML is None, and a number is an
+    # int; either used to raise here, at import, before any handler
+    # existed -- every request then failed at the gateway.
+    log_level = getattr(logging, str(level or "INFO").upper(), logging.INFO)
+    if not isinstance(log_level, int):
+        log_level = logging.INFO
     root_logger.setLevel(log_level)
 
     # Create StreamHandler

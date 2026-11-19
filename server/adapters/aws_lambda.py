@@ -85,14 +85,15 @@ def lambda_handler(
         )
 
         # Extract HTTP method (supports both formats)
-        http_method = event.get("requestContext", {}).get("http", {}).get(
+        request_context = event.get("requestContext") or {}
+        http_method = (request_context.get("http") or {}).get(
             "method"
         ) or event.get("httpMethod", "POST")
 
         # Extract path (supports both formats)
         request_path = (
             event.get("rawPath")
-            or event.get("requestContext", {}).get("http", {}).get("path")
+            or (request_context.get("http") or {}).get("path")
             or event.get("path", "/")
         )
 
