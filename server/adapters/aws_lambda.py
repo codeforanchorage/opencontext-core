@@ -102,9 +102,12 @@ def lambda_handler(
     Returns:
         HTTP response dictionary with statusCode, headers, and body
     """
+    # Read once, and defensively: this adapter is also called from
+    # runtimes that are not Lambda (LocalStack, a test harness, another
+    # cloud's shim) with a context object that lacks the attribute, and
+    # the error path below must not be the thing that raises.
+    request_id = getattr(context, "aws_request_id", None) or "unknown"
     try:
-        # Extract request ID from context
-        request_id = context.aws_request_id if context else "unknown"
         function_name = getattr(context, "function_name", None) if context else None
         memory_limit = getattr(context, "memory_limit_in_mb", None) if context else None
 
@@ -258,8 +261,8 @@ def lambda_handler(
 
     except Exception as e:
         # Comprehensive error handling - catch all exceptions and return 500
-        request_id = context.aws_request_id if context else "unknown"
-
+        # `request_id` was read before the try, so a context without the
+        # attribute cannot turn this 500 into an escaping exception.
         logger.error(
             f"Error in Lambda handler: {e}",
             extra={
