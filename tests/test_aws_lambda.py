@@ -7,6 +7,7 @@ and integration with UniversalHTTPHandler.
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from server.adapters import aws_lambda
 from server.adapters.aws_lambda import lambda_handler, get_handler
 
 
@@ -367,3 +368,32 @@ class TestGetHandler:
 
         handler = get_handler()
         assert handler is existing_handler
+
+
+class TestAContextFromAnotherRuntime:
+    """This adapter is also called from runtimes that are not Lambda
+    (LocalStack, a harness, another cloud's shim) with a context object
+    that has no `aws_request_id`. Reading it in the error path meant the
+    handler raised *while failing*: no 500 body, no CORS headers, and the
+    caller got a bare traceback instead of an HTTP response.
+    """
+
+    class Bare:
+        function_name = "t"
+
+    def test_a_context_without_aws_request_id_still_returns_a_500(self):
+        aws_lambda._handler = None
+
+        # A list is not an event shape at all, so the handler fails inside
+        # the try and has to answer through its error path.
+        response = lambda_handler([], self.Bare())
+
+        assert response["statusCode"] == 500
+        assert json.loads(response["body"])["error"]["data"] == "Request ID: unknown"
+
+    def test_the_response_still_carries_cors_headers(self):
+        aws_lambda._handler = None
+
+        response = lambda_handler([], self.Bare())
+
+        assert "Access-Control-Allow-Origin" in response["headers"]

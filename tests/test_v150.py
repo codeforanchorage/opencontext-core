@@ -289,3 +289,70 @@ class TestOneRequestIsLoggedOnce:
             for record in caplog.records
         )
         assert big not in logged
+
+
+class TestTheCapBoundsItsOwnSummary:
+    """The capped value is replaced by a summary, and the summary is what
+    has to fit. It did not: 50 key names of 10 KB each made a "bounded"
+    log line 500 KB. A log event over the service's size limit is dropped
+    whole, so the one line that was supposed to stay small -- and the only
+    record of a tool that returned a large result -- was the one lost.
+
+    The names come from the tool: a result keyed by a URL, a title, or a
+    serialized document is ordinary (an aggregation keyed by coordinates,
+    say), not a contrived payload.
+    """
+
+    def test_long_key_names_cannot_blow_past_the_cap(self):
+        set_log_value_limit(8192)
+        value = {f"{'k' * 10_000}{i}": i for i in range(50)}
+
+        summary = cap_for_log(value)
+
+        logged = len(json.dumps(summary).encode("utf-8"))
+        assert logged <= 8192, f"summary was {logged} bytes"
+        assert summary["_truncated"] is True
+        assert len(summary["_keys"]) == 50
+        # Shortened, and visibly shortened.
+        assert all(key.endswith("...") for key in summary["_keys"])
+
+    def test_a_whole_response_log_line_stays_under_the_cap(self):
+        set_log_value_limit(8192)
+        result = {"rows": {f"{'x' * 5_000}{i}": 1 for i in range(50)}}
+
+        record = format_jsonrpc_response_log(
+            request_id=1, method="tools/call", result=result
+        )
+
+        logged = len(json.dumps(record, default=str).encode("utf-8"))
+        # The record carries the cap plus its own small fields.
+        assert logged <= 8192 + 1024, f"log line was {logged} bytes"
+
+    def test_more_keys_than_are_listed_are_counted(self):
+        set_log_value_limit(8192)
+        value = {f"k{i}": "x" * 100 for i in range(200)}
+
+        summary = cap_for_log(value)
+
+        assert len(summary["_keys"]) == 50
+        assert summary["_keys_total"] == 200
+
+    def test_a_summary_within_the_cap_does_not_advertise_more_keys(self):
+        set_log_value_limit(8192)
+        summary = cap_for_log({f"k{i}": "x" * 5_000 for i in range(3)})
+
+        assert "_keys_total" not in summary
+        assert summary["_keys"] == ["k0", "k1", "k2"]
+
+    def test_a_cap_too_small_for_the_summary_drops_the_keys(self):
+        """A cap of a few bytes cannot hold a list of names at all. The
+        size and the count survive; the cap is not broken to keep them."""
+        set_log_value_limit(64)
+        try:
+            summary = cap_for_log({f"{'k' * 100}{i}": i for i in range(3)})
+        finally:
+            set_log_value_limit(None)
+
+        assert "_keys" not in summary
+        assert summary["_keys_total"] == 3
+        assert summary["_truncated"] is True

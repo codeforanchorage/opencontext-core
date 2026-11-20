@@ -14,6 +14,7 @@ from core.validators import (
     get_enabled_plugin_config,
     load_and_validate_config,
     validate_plugin_count,
+    validate_config,
     validate_config_structure,
     get_logging_config,
 )
@@ -378,3 +379,68 @@ class TestGetLoggingConfig:
 
         assert logging_config["level"] == "INFO"
         assert logging_config["format"] == "json"
+
+
+class TestEnabledMustBeABoolean:
+    """`enabled: "false"` is the quoted form of an ordinary mistake, and
+    a non-empty string is true. It used to import and run a plugin the
+    operator believed was switched off, and it made a one-plugin config
+    fail with "Multiple Plugins Enabled" the moment a second plugin said
+    "no".
+    """
+
+    @pytest.mark.parametrize("value", ["false", "no", "off", "0", "true", 1, 0, [], {}])
+    def test_a_non_boolean_enabled_is_rejected_by_name(self, value):
+        config = {"plugins": {"ckan": {"enabled": value}}}
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_plugin_count(config)
+
+        assert "plugins.ckan.enabled" in str(excinfo.value)
+
+    def test_a_quoted_false_does_not_count_as_an_enabled_plugin(self):
+        config = {"plugins": {"ckan": {"enabled": "false"}}}
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_plugin_count(config)
+
+        # It is a config error, not "No Plugins Enabled": the operator
+        # has to be told which key is wrong.
+        assert "must be true or false" in str(excinfo.value)
+
+    def test_an_empty_enabled_is_treated_as_absent(self):
+        config = {
+            "plugins": {
+                "ckan": {"enabled": True},
+                "other": {"enabled": None},
+            }
+        }
+
+        assert validate_plugin_count(config) == (["ckan"], 1)
+
+
+class TestTheLoggingSectionItself:
+    """A scalar where a nested block was meant (`logging: debug`) passed
+    validation and then raised AttributeError in get_logging_config, which
+    the handler swallows, so the deployment ran at INFO while its operator
+    asked for DEBUG.
+    """
+
+    @pytest.mark.parametrize("section", ["debug", ["DEBUG"], 10, True])
+    def test_a_section_that_is_not_a_mapping_fails_at_load_time(self, section):
+        config = {"plugins": {"ckan": {"enabled": True}}, "logging": section}
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_config(config)
+
+        assert "logging" in str(excinfo.value)
+
+    def test_get_logging_config_returns_defaults_instead_of_raising(self):
+        config = {"logging": "debug"}
+
+        assert get_logging_config(config) == {"level": "INFO", "format": "json"}
+
+    def test_a_mapping_is_still_read(self):
+        config = {"logging": {"level": "DEBUG", "format": "text"}}
+
+        assert get_logging_config(config) == {"level": "DEBUG", "format": "text"}

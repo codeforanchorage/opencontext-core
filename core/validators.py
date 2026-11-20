@@ -37,7 +37,23 @@ def validate_plugin_count(config: Dict[str, Any]) -> Tuple[List[str], int]:
     enabled_plugins = []
 
     for plugin_name, plugin_config in plugins_config.items():
-        if isinstance(plugin_config, dict) and plugin_config.get("enabled", False):
+        if not isinstance(plugin_config, dict):
+            continue
+        enabled = plugin_config.get("enabled", False)
+        if enabled is None:
+            # `enabled:` with no value: absent, not a mistake worth failing on.
+            enabled = False
+        if not isinstance(enabled, bool):
+            # Truthiness is not a boolean here: the string "false" (the
+            # quoted form of a config typo) is true, so it used to import
+            # and run a plugin the operator believes is switched off --
+            # and to turn a one-plugin config into a fatal "Multiple
+            # Plugins Enabled" the moment a second plugin said "no".
+            raise ConfigurationError(
+                f"ERROR: Configuration Error: 'plugins.{plugin_name}.enabled' "
+                f"must be true or false, got {enabled!r}"
+            )
+        if enabled:
             enabled_plugins.append(plugin_name)
 
     count = len(enabled_plugins)
@@ -237,6 +253,16 @@ def validate_config(config: Any) -> Tuple[List[str], int]:
     """
     validate_config_structure(config)
     enabled = validate_plugin_count(config)
+    # `logging:` is a nested block. A scalar there (`logging: debug`, an
+    # ordinary YAML mistake for `logging:\n  level: debug`) used to pass
+    # validation and then raise AttributeError in get_logging_config, so
+    # the deployment silently ran at INFO while its operator asked for
+    # DEBUG. Fail at load time instead, like every other malformed value.
+    logging_section = config.get("logging") if isinstance(config, dict) else None
+    if logging_section is not None and not isinstance(logging_section, dict):
+        raise ConfigurationError(
+            f"'logging' must be a mapping, got {logging_section!r}"
+        )
     get_http_settings(config)
     get_log_value_limit(config)
     return enabled
@@ -316,6 +342,12 @@ def get_logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary with logging configuration (level, format)
     """
     logging_config = config.get("logging", {})
+    if not isinstance(logging_config, dict):
+        # validate_config rejects this, so reaching it means the caller
+        # skipped validation. Return the defaults rather than raising
+        # AttributeError out of a logging call, the same way
+        # get_log_value_limit treats the section.
+        logging_config = {}
     return {
         "level": logging_config.get("level", "INFO"),
         "format": logging_config.get("format", "json"),

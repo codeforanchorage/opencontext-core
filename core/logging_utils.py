@@ -289,6 +289,14 @@ def sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
 DEFAULT_LOG_VALUE_MAX_BYTES = 8192
 # A top-level key kept in a capped value's summary must itself be small.
 LOG_KEPT_KEY_MAX_BYTES = 1024
+# A key *name* listed in a summary must be small too. The summary is the
+# thing that bounds the line: 50 key names of 10 KB each (a tool result
+# keyed by a long URL, a title, a serialized document) made the "capped"
+# summary 500 KB, and a log event over the service's size limit is
+# dropped whole -- exactly what the cap exists to prevent.
+LOG_SUMMARY_KEY_MAX_BYTES = 96
+# Key names listed before a summary says how many more there were.
+LOG_SUMMARY_MAX_KEYS = 50
 # Keys kept when params / a result are too large to log whole: the ones
 # log queries and dashboards read (which tool, which client, which
 # revision, did it fail).
@@ -311,14 +319,33 @@ def _json_size(value: Any) -> int:
     return len(json.dumps(value, default=str).encode("utf-8"))
 
 
+def _summary_key(key: Any) -> str:
+    """A key name, shortened to ``LOG_SUMMARY_KEY_MAX_BYTES`` of UTF-8.
+
+    Bytes, not characters: the summary is measured in UTF-8 bytes, and a
+    name of 96 multibyte characters is 288 bytes.
+    """
+    text = str(key)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= LOG_SUMMARY_KEY_MAX_BYTES:
+        return text
+    keep = LOG_SUMMARY_KEY_MAX_BYTES - len("...")
+    return encoded[:keep].decode("utf-8", "ignore") + "..."
+
+
 def cap_for_log(value: Any, keep: tuple = ()) -> Any:
     """Return ``value`` if it is small enough to log, else a summary.
 
     The summary says how large the value was and which top-level keys it
     had, and carries the ``keep`` keys through when they are small, so a
-    capped line still answers "which tool" and "which client". Logging
-    must never be what fails a request: anything that cannot be measured
-    is replaced by a marker.
+    capped line still answers "which tool" and "which client".
+
+    The summary is bound by the same cap as the value it replaces: the
+    key names it lists are shortened, only ``LOG_SUMMARY_MAX_KEYS`` of
+    them are listed, and if the result still does not fit (a cap set very
+    low) the keys are dropped rather than the cap broken. Logging must
+    never be what fails a request: anything that cannot be measured is
+    replaced by a marker.
     """
     limit = _log_value_max_bytes
     if not limit or value is None:
@@ -329,10 +356,20 @@ def cap_for_log(value: Any, keep: tuple = ()) -> Any:
             return value
         summary: Dict[str, Any] = {"_truncated": True, "_bytes": size}
         if isinstance(value, dict):
-            summary["_keys"] = sorted(str(key) for key in value)[:50]
+            keys = [_summary_key(key) for key in value]
+            summary["_keys"] = sorted(keys)[:LOG_SUMMARY_MAX_KEYS]
+            if len(value) > LOG_SUMMARY_MAX_KEYS:
+                summary["_keys_total"] = len(value)
             for key in keep:
                 if key in value and _json_size(value[key]) <= LOG_KEPT_KEY_MAX_BYTES:
                     summary[key] = value[key]
+        if _json_size(summary) > limit:
+            # A cap smaller than the summary's own skeleton. Keep the
+            # marker and the size, and say how many keys were elided
+            # instead of listing any of them.
+            summary.pop("_keys", None)
+            if isinstance(value, dict):
+                summary["_keys_total"] = len(value)
         return summary
     except Exception:
         return {"_truncated": True}
