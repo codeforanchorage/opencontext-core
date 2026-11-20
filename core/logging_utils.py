@@ -281,6 +281,75 @@ def sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return sanitized
 
 
+# Largest serialized size, in bytes, of one value logged from a JSON-RPC
+# message (params, result, error). A tool result can be hundreds of
+# kilobytes; logged whole on every call it costs CloudWatch ingestion and
+# CPU, and a log event over the service's size limit is dropped or split.
+# A deployment changes it with `logging.max_value_bytes` (0 = no cap).
+DEFAULT_LOG_VALUE_MAX_BYTES = 8192
+# A top-level key kept in a capped value's summary must itself be small.
+LOG_KEPT_KEY_MAX_BYTES = 1024
+# Keys kept when params / a result are too large to log whole: the ones
+# log queries and dashboards read (which tool, which client, which
+# revision, did it fail).
+LOG_KEEP_PARAM_KEYS = ("name", "clientInfo", "protocolVersion")
+LOG_KEEP_RESULT_KEYS = ("isError", "resultType", "protocolVersion", "serverInfo")
+
+_log_value_max_bytes: int = DEFAULT_LOG_VALUE_MAX_BYTES
+
+
+def set_log_value_limit(max_bytes: Optional[int]) -> None:
+    """Set the cap `cap_for_log` applies. None restores the default; 0
+    turns the cap off."""
+    global _log_value_max_bytes
+    _log_value_max_bytes = (
+        DEFAULT_LOG_VALUE_MAX_BYTES if max_bytes is None else int(max_bytes)
+    )
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, default=str).encode("utf-8"))
+
+
+def cap_for_log(value: Any, keep: tuple = ()) -> Any:
+    """Return ``value`` if it is small enough to log, else a summary.
+
+    The summary says how large the value was and which top-level keys it
+    had, and carries the ``keep`` keys through when they are small, so a
+    capped line still answers "which tool" and "which client". Logging
+    must never be what fails a request: anything that cannot be measured
+    is replaced by a marker.
+    """
+    limit = _log_value_max_bytes
+    if not limit or value is None:
+        return value
+    try:
+        size = _json_size(value)
+        if size <= limit:
+            return value
+        summary: Dict[str, Any] = {"_truncated": True, "_bytes": size}
+        if isinstance(value, dict):
+            summary["_keys"] = sorted(str(key) for key in value)[:50]
+            for key in keep:
+                if key in value and _json_size(value[key]) <= LOG_KEPT_KEY_MAX_BYTES:
+                    summary[key] = value[key]
+        return summary
+    except Exception:
+        return {"_truncated": True}
+
+
+def _body_size(body: Any) -> int:
+    """Size of a request or response body in bytes, whatever its type."""
+    if body is None:
+        return 0
+    if isinstance(body, (bytes, bytearray)):
+        return len(body)
+    try:
+        return len(str(body).encode("utf-8", errors="replace"))
+    except Exception:
+        return 0
+
+
 def sanitize_request_body(body: str) -> Dict[str, Any]:
     """Parse and sanitize JSON request body.
 
@@ -347,7 +416,10 @@ def format_request_log(
         "http_method": http_method,
         "request_path": request_path,
         "request_headers": sanitize_headers(headers),
-        "request_body": sanitize_request_body(body),
+        # The size, not the content. The JSON-RPC layer logs the parsed
+        # message (`jsonrpc_params`); logging the body here as well
+        # wrote every request twice and parsed it a second time.
+        "request_bytes": _body_size(body),
     }
 
     # Add Lambda context metadata if available
@@ -390,7 +462,8 @@ def format_response_log(
         "request_id": request_id,
         "response_status": status_code,
         "response_headers": sanitize_headers(headers),
-        "response_body": sanitize_response_body(body),
+        # The size, not the content: see format_request_log.
+        "response_bytes": _body_size(body),
         "duration_ms": round(duration_ms, 2),
         "success": success,
     }
@@ -416,7 +489,9 @@ def format_jsonrpc_request_log(
     return {
         "jsonrpc_request_id": request_id,
         "jsonrpc_method": method,
-        "jsonrpc_params": sanitize_dict(params),
+        "jsonrpc_params": cap_for_log(
+            sanitize_dict(params), keep=LOG_KEEP_PARAM_KEYS
+        ),
         "is_notification": is_notification,
     }
 
@@ -447,10 +522,14 @@ def format_jsonrpc_response_log(
     }
 
     if error:
-        log_data["jsonrpc_error"] = sanitize_dict(error)
+        log_data["jsonrpc_error"] = cap_for_log(sanitize_dict(error))
         log_data["success"] = False
     else:
-        log_data["jsonrpc_result"] = sanitize_dict(result) if result else None
+        log_data["jsonrpc_result"] = (
+            cap_for_log(sanitize_dict(result), keep=LOG_KEEP_RESULT_KEYS)
+            if result
+            else None
+        )
         log_data["success"] = True
 
     return log_data

@@ -5,7 +5,7 @@ with special emphasis on enforcing the "one fork = one MCP server" rule.
 """
 
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -142,6 +142,11 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
       this with HTTP 413 before they are parsed. Unset means no
       limit beyond the gateway's own; set it only if no tool takes
       large arguments (an inline GeoJSON polygon can be big).
+    * ``server_reuse_across_invocations`` -- whether the Lambda adapter
+      keeps the plugin manager (and so the plugin, its HTTP client and
+      its caches) alive between invocations of a warm container.
+      Default true. Set false to rebuild the plugin for every
+      request, which is what the adapter did before 1.5.0.
     * ``server_mcp_paths`` -- the request paths served as MCP routes.
       A deployment exposing a second route on the same handler (for
       example one that API Gateway guards with an API key) lists it
@@ -152,8 +157,8 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         Dict with ``allowed_origins`` (frozenset), ``default_cors_origin``
-        (str), ``mcp_paths`` (tuple, in configured order) and
-        ``max_body_bytes`` (int or None)
+        (str), ``mcp_paths`` (tuple, in configured order),
+        ``max_body_bytes`` (int or None) and ``reuse_server`` (bool)
 
     Raises:
         ConfigurationError: If either key is present but malformed
@@ -197,7 +202,17 @@ def get_http_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             f"got {max_body_bytes!r}"
         )
 
+    reuse_server = config.get("server_reuse_across_invocations")
+    if reuse_server is None:
+        reuse_server = True
+    elif not isinstance(reuse_server, bool):
+        raise ConfigurationError(
+            "'server_reuse_across_invocations' must be true or false, "
+            f"got {reuse_server!r}"
+        )
+
     return {
+        "reuse_server": reuse_server,
         "max_body_bytes": max_body_bytes,
         "allowed_origins": frozenset(origins),
         "default_cors_origin": origins[0],
@@ -223,6 +238,7 @@ def validate_config(config: Any) -> Tuple[List[str], int]:
     validate_config_structure(config)
     enabled = validate_plugin_count(config)
     get_http_settings(config)
+    get_log_value_limit(config)
     return enabled
 
 
@@ -264,6 +280,30 @@ def load_and_validate_config(config_path: str = "config.yaml") -> Dict[str, Any]
     )
 
     return config
+
+
+def get_log_value_limit(config: Dict[str, Any]) -> Optional[int]:
+    """Read the optional ``logging.max_value_bytes`` setting.
+
+    The largest serialized size of one value logged from a JSON-RPC
+    message (params, result, error); a larger one is logged as a summary.
+    0 turns the cap off. Returns None when unset, meaning the default.
+
+    Raises:
+        ConfigurationError: If the setting is present but malformed
+    """
+    logging_config = config.get("logging") if isinstance(config, dict) else None
+    if not isinstance(logging_config, dict):
+        return None
+    value = logging_config.get("max_value_bytes")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigurationError(
+            "'logging.max_value_bytes' must be an integer of 0 or more "
+            f"(0 = no cap), got {value!r}"
+        )
+    return value
 
 
 def get_logging_config(config: Dict[str, Any]) -> Dict[str, Any]:

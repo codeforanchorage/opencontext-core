@@ -25,7 +25,7 @@ work unchanged when a repo switches from vendored copies to this package.
 Pin a tag in the deployment's `requirements.txt`:
 
 ```
-opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.4.1
+opencontext-core @ git+https://github.com/codeforanchorage/opencontext-core@v1.5.0
 ```
 
 Each deployment upgrades on its own schedule by changing that tag.
@@ -73,6 +73,8 @@ The converted Boston deployment's `scripts/deploy.sh` shows both paths.
 | `instructions` | the plugin's `get_instructions()`, else none | MCP `instructions` text; config wins over the plugin |
 | `server_mcp_paths` | `["/mcp"]` | Request paths served as MCP routes |
 | `server_max_body_bytes` | no limit | Reject larger request bodies with HTTP 413 before parsing. Leave unset if any tool takes large arguments |
+| `server_reuse_across_invocations` | `true` | On Lambda, keep the plugin manager, the plugin and its HTTP client alive between invocations of a warm container. `false` rebuilds the plugin for every request, as before 1.5.0 |
+| `logging.max_value_bytes` | `8192` | Largest serialized size of one value logged from a JSON-RPC message (params, result, error); a larger one is logged as a summary. `0` = no cap |
 | `server_allowed_origins` | claude.ai, claude.com, console.anthropic.com, MCP Inspector on localhost | The complete browser-origin allowlist; the first entry is the default CORS origin |
 
 Exactly one plugin must be enabled under `plugins:`.
@@ -86,6 +88,46 @@ When it is empty, `config.yaml` is read from `$LAMBDA_TASK_ROOT`, else
 the current directory.
 
 ## Changes
+
+**1.5.0** — the Lambda adapter keeps the server between invocations, and
+logging is bounded. No protocol change. Read the first item before
+upgrading a deployment.
+
+- **A plugin now lives as long as its warm container, not one request.**
+  The adapter used to shut the plugin manager down after every request
+  and build it again for the next, because `asyncio.run` closes its loop
+  and an HTTP client cannot outlive the loop it was made on. Plugin
+  `initialize()` therefore ran on every request, `ping` and `tools/list`
+  included. On the server where this was found that was six upstream
+  calls and a new TLS context each time. The adapter now runs every
+  invocation on one event loop and keeps the plugin manager.
+  What to check in a plugin before upgrading:
+  - State on `self` (caches, counters, a per-request deadline) now
+    persists across requests. Anything that assumed a fresh object per
+    request needs a lifetime or a reset.
+  - The HTTP client is reused, so its connection pool survives a
+    container being frozen between invocations. A plugin should retry
+    a transport error once, as it should have already.
+  - `initialize()` runs once per container, so a startup fetch that
+    failed is not retried on the next request unless the plugin does so.
+  Set `server_reuse_across_invocations: false` to keep the old behaviour.
+  If an invocation fails outside the handler's own error handling, the
+  server is discarded and rebuilt on the next request.
+- **A request is logged once, and large values are summarised.** The HTTP
+  layer logged the whole request and response body and the JSON-RPC
+  layer logged them again as `jsonrpc_params` / `jsonrpc_result`, with no
+  size limit: one `tools/list` wrote about 98 KB of log. The HTTP lines
+  now carry `request_bytes` / `response_bytes` instead of
+  `request_body` / `response_body`. A `jsonrpc_params`, `jsonrpc_result`
+  or `jsonrpc_error` over `logging.max_value_bytes` (default 8192) is
+  logged as `{"_truncated": true, "_bytes": N, "_keys": [...]}`, keeping
+  `name`, `clientInfo` and `protocolVersion` from params and `isError`,
+  `resultType`, `protocolVersion` and `serverInfo` from results, so
+  queries on `jsonrpc_params.name` and `jsonrpc_params.clientInfo.name`
+  are unaffected. A query that read `request_body` or `response_body`
+  must move to the `jsonrpc_*` fields.
+- A malformed `logging.max_value_bytes` or
+  `server_reuse_across_invocations` stops the config loading.
 
 **1.4.1** — hardening from a review of 1.4.0. No protocol change.
 

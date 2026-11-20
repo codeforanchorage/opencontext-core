@@ -34,6 +34,39 @@ logger = logging.getLogger(__name__)
 # Module-level handler instance for Lambda warm starts
 _handler: Optional[UniversalHTTPHandler] = None
 
+# One event loop for the life of the container. `asyncio.run` makes a new
+# loop per invocation and closes it afterwards, and an HTTP client cannot
+# outlive the loop it was created on -- which is why this adapter used to
+# shut the plugin down after EVERY request and build it again for the
+# next one: plugin startup (often several upstream calls), a new TLS
+# context and an empty connection pool on each request, `ping` included.
+# Keeping the loop lets the plugin manager, the plugin and its client
+# survive across a warm container's invocations.
+_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_loop() -> asyncio.AbstractEventLoop:
+    """The container's event loop, created on first use."""
+    global _loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+    return _loop
+
+
+async def _discard_server() -> None:
+    """Shut the plugin manager down and forget it.
+
+    The next request builds a fresh one. The globals are cleared first,
+    so a failing shutdown cannot leave a half-closed plugin in place.
+    """
+    from server import http_handler
+
+    plugin_manager = http_handler._plugin_manager
+    http_handler._plugin_manager = None
+    http_handler._mcp_server = None
+    if plugin_manager is not None:
+        await plugin_manager.shutdown()
+
 
 def get_handler() -> UniversalHTTPHandler:
     """Get or create the universal HTTP handler instance.
@@ -163,27 +196,48 @@ def lambda_handler(
         # Get handler and process request
         handler = get_handler()
 
-        async def _run_with_cleanup():
+        def _request():
+            return handler.handle_request(
+                method=http_method,
+                path=request_path,
+                body=body,
+                headers=headers,
+                request_id=request_id,
+            )
+
+        if UniversalHTTPHandler._http_settings().get("reuse_server", True):
+            # Keep the server for the next invocation of this container.
+            loop = _get_loop()
             try:
-                return await handler.handle_request(
-                    method=http_method,
-                    path=request_path,
-                    body=body,
-                    headers=headers,
-                    request_id=request_id,
+                status_code, response_headers, response_body = (
+                    loop.run_until_complete(_request())
                 )
-            finally:
-                # Close plugin HTTP clients before event loop closes.
-                # Fixes "Event loop is closed" on warm starts when tools use httpx.
-                from server import http_handler
+            except BaseException:
+                # The handler answers its own errors, so getting here
+                # means something unexpected. Do not carry a server in an
+                # unknown state into the next invocation.
+                try:
+                    loop.run_until_complete(_discard_server())
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Could not shut the server down after a failed "
+                        f"invocation: {type(cleanup_error).__name__}",
+                        extra={"request_id": request_id},
+                    )
+                raise
+        else:
+            # `server_reuse_across_invocations: false`: a new loop and a
+            # new plugin for every request, as before 1.5.0. The plugin's
+            # HTTP clients are closed before the loop is.
+            async def _run_with_cleanup():
+                try:
+                    return await _request()
+                finally:
+                    await _discard_server()
 
-                if http_handler._plugin_manager is not None:
-                    await http_handler._plugin_manager.shutdown()
-                    http_handler._plugin_manager = None
-                    http_handler._mcp_server = None
-
-        # Run async handler
-        status_code, response_headers, response_body = asyncio.run(_run_with_cleanup())
+            status_code, response_headers, response_body = asyncio.run(
+                _run_with_cleanup()
+            )
 
         # Transform to Lambda response format
         lambda_response = {

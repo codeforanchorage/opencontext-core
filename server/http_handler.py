@@ -16,6 +16,7 @@ from core.logging_utils import (
     configure_json_logging,
     format_request_log,
     format_response_log,
+    set_log_value_limit,
 )
 from core.mcp_server import ERA_MODERN, MCPServer
 from core.plugin_manager import PluginManager
@@ -24,6 +25,7 @@ from core.validators import (
     DEFAULT_MCP_PATHS,
     ConfigurationError,
     get_http_settings,
+    get_log_value_limit,
     get_logging_config,
     load_and_validate_config,
     validate_config,
@@ -101,7 +103,9 @@ except Exception:
 configure_json_logging(level=log_level, pretty=False)  # Compact JSON for CloudWatch
 logger = logging.getLogger(__name__)
 
-# Global variables for container reuse (warm starts)
+# Global variables for container reuse (warm starts). The Lambda adapter
+# keeps these alive between invocations unless the deployment sets
+# `server_reuse_across_invocations: false`.
 _plugin_manager: Optional[PluginManager] = None
 _mcp_server: Optional[MCPServer] = None
 _config: Optional[Dict[str, Any]] = None
@@ -171,6 +175,10 @@ async def _initialize_server() -> None:
 
     try:
         config = _load_config()
+
+        # The size cap on logged JSON-RPC values, from this deployment's
+        # config (validated when the config was loaded).
+        set_log_value_limit(get_log_value_limit(config))
 
         # Initialize Plugin Manager
         _plugin_manager = PluginManager(config)
@@ -251,6 +259,7 @@ class UniversalHTTPHandler:
                 "default_cors_origin": cls.DEFAULT_CORS_ORIGIN,
                 "mcp_paths": tuple(cls.MCP_PATHS),
                 "max_body_bytes": None,
+                "reuse_server": True,
             }
 
     @classmethod

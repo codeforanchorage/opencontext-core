@@ -43,6 +43,12 @@ def reset_http_handler_globals():
     from server.adapters import aws_lambda
 
     saved_lambda_handler = aws_lambda._handler
+    # Since 1.5.0 the adapter also keeps one event loop for the life of the
+    # process, and the log-value cap is module state set from the config.
+    saved_lambda_loop = aws_lambda._loop
+    from core import logging_utils
+
+    saved_log_limit = logging_utils._log_value_max_bytes
     try:
         yield
     finally:
@@ -50,6 +56,8 @@ def reset_http_handler_globals():
         http_handler._mcp_server = saved_mcp_server
         http_handler._config = saved_config
         aws_lambda._handler = saved_lambda_handler
+        aws_lambda._loop = saved_lambda_loop
+        logging_utils._log_value_max_bytes = saved_log_limit
 
 
 FIXTURE_DEPLOYMENT = Path(__file__).parent / "fixtures" / "deployment"
