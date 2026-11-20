@@ -169,10 +169,43 @@ class TestMethodValidation:
         )
 
         assert status == 405
-        assert headers["Allow"] == "POST"
+        # OPTIONS is served on this route (see handle_options), so the
+        # Allow header must not claim POST is the only method.
+        assert headers["Allow"] == "POST, OPTIONS"
         error_body = json.loads(body)
         assert error_body["error"]["code"] == -32601
         assert error_body["error"]["message"] == "Method Not Allowed"
+
+    @pytest.mark.asyncio
+    async def test_options_is_answered_as_a_preflight(self):
+        """An adapter for a cloud other than AWS sends every method here,
+        so OPTIONS has to reach the preflight handler: answering 405 broke
+        CORS outright on those adapters, while claiming in the same headers
+        that OPTIONS is allowed.
+        """
+        status, headers, body = await UniversalHTTPHandler().handle_request(
+            method="OPTIONS",
+            path="/mcp",
+            body="",
+            headers={"origin": "https://claude.ai"},
+        )
+
+        assert status == 200
+        assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
+        assert "authorization" in headers["Access-Control-Allow-Headers"]
+        assert body == ""
+
+    @pytest.mark.asyncio
+    async def test_options_from_a_disallowed_origin_is_refused(self):
+        status, headers, _body = await UniversalHTTPHandler().handle_request(
+            method="OPTIONS",
+            path="/mcp",
+            body="",
+            headers={"origin": "https://evil.example"},
+        )
+
+        assert status == 403
+        assert headers["Access-Control-Allow-Origin"] == "https://claude.ai"
 
     @pytest.mark.asyncio
     async def test_put_method_returns_405(self):
@@ -237,13 +270,24 @@ class TestCORS:
                 headers["Access-Control-Allow-Methods"]
                 == "POST, OPTIONS"
             )
-            assert (
-                headers["Access-Control-Allow-Headers"]
-                == (
-                "content-type, accept, mcp-session-id, mcp-protocol-version, "
-                "mcp-method, mcp-name"
-            )
-            )
+            # Every header a browser client has to send, credentials
+            # included: anything missing here is blocked by the browser
+            # before the request leaves it.
+            allowed = {
+                h.strip()
+                for h in headers["Access-Control-Allow-Headers"].split(",")
+            }
+            assert {
+                "content-type",
+                "accept",
+                "authorization",
+                "x-api-key",
+                "mcp-protocol-version",
+                "mcp-method",
+                "mcp-name",
+            } <= allowed
+            # The list is fixed, never a wildcard.
+            assert "*" not in allowed
 
     def test_handle_options_returns_cors_headers(self):
         """Test that OPTIONS handler returns CORS headers."""
@@ -259,13 +303,19 @@ class TestCORS:
             headers["Access-Control-Allow-Methods"]
             == "POST, OPTIONS"
         )
-        assert (
-            headers["Access-Control-Allow-Headers"]
-            == (
-                "content-type, accept, mcp-session-id, mcp-protocol-version, "
-                "mcp-method, mcp-name"
-            )
-        )
+        allowed = {
+            h.strip()
+            for h in headers["Access-Control-Allow-Headers"].split(",")
+        }
+        assert {
+            "content-type",
+            "accept",
+            "authorization",
+            "x-api-key",
+            "mcp-protocol-version",
+            "mcp-method",
+            "mcp-name",
+        } <= allowed
         assert headers["Access-Control-Max-Age"] == "86400"
         assert body == ""
 
@@ -378,6 +428,35 @@ class TestOriginValidation:
 
 
 class TestProtocolVersionHeader:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_id", ["NaN", "Infinity", "1e400"])
+    async def test_a_non_finite_id_is_not_echoed_in_the_400_body(self, raw_id):
+        """This body is built before any JSON-RPC handling, with the id
+        taken straight from the client's text. json.loads accepts NaN and
+        Infinity, so a client could send one and json.dumps wrote it back
+        as a bare token: a body no strict parser accepts, which costs the
+        client the error that lists the versions it can retry with.
+        """
+        handler = UniversalHTTPHandler()
+
+        status, _, body = await handler.handle_request(
+            method="POST",
+            path="/mcp",
+            body=f'{{"jsonrpc":"2.0","id":{raw_id},"method":"ping"}}',
+            headers={"mcp-protocol-version": "1999-01-01"},
+        )
+
+        assert status == 400
+
+        def refuse(token):
+            raise ValueError(f"not JSON: {token}")
+
+        parsed = json.loads(body, parse_constant=refuse)
+        assert parsed["id"] is None
+        assert parsed["error"]["code"] == -32022
+        assert parsed["error"]["data"]["requested"] == "1999-01-01"
+
+
     """MCP-Protocol-Version header validation."""
 
     @pytest.mark.asyncio

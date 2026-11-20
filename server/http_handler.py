@@ -18,7 +18,7 @@ from core.logging_utils import (
     format_response_log,
     set_log_value_limit,
 )
-from core.mcp_server import ERA_MODERN, MCPServer
+from core.mcp_server import ERA_MODERN, MCPServer, dumps_response
 from core.plugin_manager import PluginManager
 from core.validators import (
     DEFAULT_ALLOWED_ORIGINS,
@@ -309,8 +309,16 @@ class UniversalHTTPHandler:
             "Access-Control-Allow-Origin": allow_origin,
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
+            # `authorization` (the MCP HTTP transport's bearer token) and
+            # the API-key header a deployment fronts this handler with are
+            # not CORS-safelisted: a browser sends them only after a
+            # preflight that lists them, so omitting them blocked exactly
+            # the allowlisted origins above from ever making an
+            # authenticated call. `last-event-id` belongs to the SSE
+            # stream a client resumes with.
             "Access-Control-Allow-Headers": (
-                "content-type, accept, mcp-session-id, mcp-protocol-version, "
+                "content-type, accept, authorization, x-api-key, "
+                "last-event-id, mcp-session-id, mcp-protocol-version, "
                 "mcp-method, mcp-name"
             ),
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
@@ -469,6 +477,15 @@ class UniversalHTTPHandler:
                 error_body,
             )
 
+        # A preflight that arrives here is answered, not refused: OPTIONS is
+        # a method this route supports (see handle_options), and an adapter
+        # for a cloud other than AWS calls this entry point for every
+        # method, so answering 405 would break CORS outright on it.
+        if method == "OPTIONS":
+            return self.handle_options(
+                request_id=request_id, request_origin=request_origin
+            )
+
         # Validate method - must be POST
         if method != "POST":
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -492,7 +509,10 @@ class UniversalHTTPHandler:
                     "duration_ms": duration_ms,
                 },
             )
-            error_headers = {"Content-Type": "application/json", "Allow": "POST"}
+            error_headers = {
+                "Content-Type": "application/json",
+                "Allow": "POST, OPTIONS",
+            }
             error_headers.update(self._get_cors_headers(request_origin))
             return (
                 405,
@@ -585,7 +605,14 @@ class UniversalHTTPHandler:
             and declared_version not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
         ):
             duration_ms = (time.perf_counter() - start_time) * 1000
-            error_body = json.dumps(
+            # Built with the JSON-RPC layer's serialiser, which is what
+            # keeps a response valid JSON: the id echoed here comes
+            # straight from the client's body, and json.loads accepts
+            # NaN / Infinity, so json.dumps wrote them back as bare
+            # tokens -- a body no strict parser accepts, costing the
+            # client the whole -32022 error including the list of
+            # versions it needs to retry with.
+            error_body = dumps_response(
                 {
                     "jsonrpc": "2.0",
                     "id": body_request_id,
