@@ -148,6 +148,24 @@ class TestTheServerSurvivesAcrossInvocations:
         assert not aws_lambda._loop.is_closed()
 
 
+class TestAFailedStartupIsRetried:
+    def test_the_next_invocation_builds_the_server_again(self, fake_server, monkeypatch):
+        attempts = []
+
+        async def flaky(self):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("Plugin stub initialization returned False")
+
+        monkeypatch.setattr(FakePluginManager, "load_plugins", flaky)
+        assert lambda_handler(ping_event(), Context())["statusCode"] == 500
+        # Nothing half-built is kept for the life of the container.
+        assert http_handler._plugin_manager is None
+        assert FakePluginManager.shut_down == 1
+        assert lambda_handler(ping_event(), Context())["statusCode"] == 200
+        assert FakePluginManager.built == 2
+
+
 class TestReuseSetting:
     def test_default_is_on(self):
         assert get_http_settings(dict(BASE_CONFIG))["reuse_server"] is True

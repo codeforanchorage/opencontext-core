@@ -113,6 +113,9 @@ upgrading a deployment.
   Set `server_reuse_across_invocations: false` to keep the old behaviour.
   If an invocation fails outside the handler's own error handling, the
   server is discarded and rebuilt on the next request.
+  A startup that fails (a plugin whose `initialize()` returns False on
+  a transient upstream error) is not kept either: the next request
+  builds the server again.
 - **A request is logged once, and large values are summarised.** The HTTP
   layer logged the whole request and response body and the JSON-RPC
   layer logged them again as `jsonrpc_params` / `jsonrpc_result`, with no

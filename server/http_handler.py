@@ -193,11 +193,33 @@ async def _initialize_server() -> None:
 
     except ConfigurationError as e:
         # Log error and crash
+        await _forget_failed_server()
         logger.error(f"Configuration error: {e}")
         raise RuntimeError(f"Configuration error: {e}") from e
     except Exception as e:
+        await _forget_failed_server()
         logger.error(f"Failed to initialize server: {e}", exc_info=True)
         raise
+
+
+async def _forget_failed_server() -> None:
+    """Drop a plugin manager whose startup did not finish.
+
+    The server is kept between invocations, so a half-built one must not
+    be: the next request starts again from nothing, which is also how a
+    plugin whose `initialize()` failed on a transient upstream error gets
+    another try.
+    """
+    global _plugin_manager, _mcp_server
+
+    failed, _plugin_manager, _mcp_server = _plugin_manager, None, None
+    if failed is not None:
+        try:
+            await failed.shutdown()
+        except Exception as e:
+            logger.warning(
+                f"Could not shut down a failed plugin manager: {type(e).__name__}"
+            )
 
 
 class UniversalHTTPHandler:
