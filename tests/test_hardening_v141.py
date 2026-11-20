@@ -216,3 +216,71 @@ class TestLambdaEventShapes:
             response = aws_lambda.lambda_handler(event, self.Ctx())
         assert response["statusCode"] == 200
         assert json.loads(response["body"])["id"] == 1
+
+
+class TestKeysAndCyclesJsonCannotExpress:
+    """The v1.4.1 fix rewrote *values*. The other half of a JSON object
+    is its keys: a dict keyed by a tuple, a Decimal or a datetime raises
+    TypeError from json.dumps and `default=` is never consulted for keys,
+    so the response was never built -- HTTP 500 with the id lost, for a
+    payload that is otherwise fine.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_result_keyed_by_coordinates_is_served(self):
+        """The ordinary case: a plugin aggregating points by (lat, lon)."""
+        status, _, out = await _post(_call(), structured={"rows": {(64.8, -147.7): 3}})
+
+        assert status == 200
+        body = _strict(out)
+        assert body["id"] == 7
+        assert body["result"]["structuredContent"] == {"rows": {"(64.8, -147.7)": 3}}
+
+    @pytest.mark.asyncio
+    async def test_a_non_finite_key_does_not_lose_the_response(self):
+        status, _, out = await _post(_call(), structured={"rows": {float("nan"): 1}})
+
+        assert status == 200
+        body = _strict(out)
+        assert body["result"]["structuredContent"] == {"rows": {"nan": 1}}
+
+    @pytest.mark.asyncio
+    async def test_a_reference_cycle_becomes_a_marker(self):
+        """json.dumps reports a cycle as ValueError and the old fallback
+        then recursed until RecursionError, again outside the request's
+        error handling."""
+        structured = {"rows": [1]}
+        structured["self"] = structured
+
+        status, _, out = await _post(_call(), structured=structured)
+
+        assert status == 200
+        body = _strict(out)
+        assert body["result"]["structuredContent"] == {
+            "rows": [1],
+            "self": "[circular]",
+        }
+
+    def test_a_shared_value_is_still_duplicated_not_marked_circular(self):
+        shared = {"x": 1}
+        payload = {"jsonrpc": "2.0", "id": 1, "result": [shared, shared]}
+
+        assert json.loads(dumps_response(payload))["result"] == [{"x": 1}, {"x": 1}]
+
+    def test_a_payload_that_beats_every_coercion_still_answers(self):
+        class Unprintable:
+            def __str__(self):
+                raise RuntimeError("no repr for you")
+
+        out = dumps_response(
+            {"jsonrpc": "2.0", "id": 5, "result": {"k": Unprintable()}}
+        )
+
+        assert _strict(out) == {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "error": {
+                "code": -32603,
+                "message": "Response could not be serialised",
+            },
+        }

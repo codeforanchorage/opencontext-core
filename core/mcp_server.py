@@ -36,15 +36,81 @@ from core.interfaces import InvalidToolParamsError, UnknownToolError
 from core.plugin_manager import PluginManager
 
 
-def _json_safe(value: Any) -> Any:
-    """A copy of ``value`` with non-finite floats replaced by None."""
+def _json_key(key: Any) -> Any:
+    """A mapping key that ``json.dumps`` can express.
+
+    ``json.dumps`` converts str, int, float, bool and None keys itself.
+    Anything else (a tuple, a Decimal, a datetime) raises TypeError, and
+    a non-finite float raises ValueError under ``allow_nan=False``, so
+    the response was never built: HTTP 500 with the id lost, for a
+    payload that is otherwise fine. A result keyed by coordinates or by
+    the object itself is the ordinary case, not an exotic one.
+    """
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool) or key is None:
+        return key
+    if isinstance(key, int):
+        return key
+    if isinstance(key, float) and math.isfinite(key):
+        return key
+    return str(key)
+
+
+def _json_safe(value: Any, _path: Optional[set] = None) -> Any:
+    """A copy of ``value`` that ``json.dumps`` can encode.
+
+    Non-finite floats become None, mapping keys json cannot express
+    become their ``str()``, and a reference back into the payload (which
+    ``json.dumps`` reports as "Circular reference detected") becomes
+    ``"[circular]"`` instead of recursing until RecursionError.
+    """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
+        path = set() if _path is None else _path
+        if id(value) in path:
+            return "[circular]"
+        path.add(id(value))
+        try:
+            return {_json_key(k): _json_safe(v, path) for k, v in value.items()}
+        finally:
+            path.discard(id(value))
     if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
+        path = set() if _path is None else _path
+        if id(value) in path:
+            return "[circular]"
+        path.add(id(value))
+        try:
+            return [_json_safe(v, path) for v in value]
+        finally:
+            path.discard(id(value))
     return value
+
+
+def _serialisation_error_response(payload: Any) -> str:
+    """The smallest valid error response for a payload that cannot be
+    serialised even after ``_json_safe``.
+
+    A response still has to exist, and it still has to say which request
+    failed: the id is kept when it is a legal JSON-RPC id (a string, or a
+    finite number that is not a bool).
+    """
+    request_id = payload.get("id") if isinstance(payload, dict) else None
+    if isinstance(request_id, bool) or not isinstance(request_id, (str, int, float)):
+        request_id = None
+    elif isinstance(request_id, float) and not math.isfinite(request_id):
+        request_id = None
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32603,
+                "message": "Response could not be serialised",
+            },
+        }
+    )
 
 
 def dumps_response(payload: Any) -> str:
@@ -57,14 +123,28 @@ def dumps_response(payload: Any) -> str:
     datetime, a Decimal) raised outside the request's error handling and
     became a 500 that had lost the request id.
 
-    Non-finite numbers become null and unencodable values their str().
+    Non-finite numbers become null, unencodable values their str(), and
+    mapping keys that json cannot express their str() as well -- values
+    alone were not enough, a result keyed by a tuple still escaped as a
+    500. A payload that cannot be serialised at all (a reference cycle,
+    nesting deep enough to exhaust the stack) becomes an error response
+    that still carries the request id.
+
     The common case, a payload that is already clean, takes the first
     branch and pays nothing extra.
     """
     try:
         return json.dumps(payload, allow_nan=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
+        pass
+    try:
         return json.dumps(_json_safe(payload), allow_nan=False, default=str)
+    except Exception:
+        # The payload has now resisted every coercion. Whatever the
+        # failure is (a ``__str__`` that raises, nesting deeper than the
+        # stack allows), the client still needs an answer, and it still
+        # needs to know which request it answers.
+        return _serialisation_error_response(payload)
 
 logger = logging.getLogger(__name__)
 
