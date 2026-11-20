@@ -132,6 +132,58 @@ upgrading a deployment.
 - A malformed `logging.max_value_bytes` or
   `server_reuse_across_invocations` stops the config loading.
 
+**1.5.1** — fixes from a review of 1.5.0. No protocol change.
+
+- **The log-value cap now bounds its own summary.** A capped value is
+  replaced by `{"_truncated": true, "_bytes": N, "_keys": [...]}`, and
+  the key names were quoted whole: 50 of them, 10 KB each (a tool result
+  keyed by a URL, a title, a serialized document), made a "bounded" log
+  line 500 KB, and a log event over the service's size limit is dropped
+  whole. Each name is now shortened to 96 bytes, at most 50 are listed,
+  a longer key set says how many there were (`_keys_total`), and a cap
+  set too low to hold the names drops them instead of the cap.
+- **`plugins.<name>.enabled` must be a boolean.** A non-empty string is
+  true, so `enabled: "false"`, `"no"` or `"off"` — the quoted form of an
+  ordinary YAML mistake — imported and ran a plugin the operator
+  believed was switched off, and made a one-plugin config fail with
+  "Multiple Plugins Enabled" once a second plugin said `"no"`. Such a
+  value is now a configuration error that names the key. `enabled:` with
+  no value still means absent.
+- **A `logging:` section that is not a mapping fails at load time.** A
+  scalar (`logging: debug`) passed validation and then raised
+  AttributeError in `get_logging_config`, which the handler swallows: the
+  deployment ran at INFO while its operator asked for DEBUG.
+- **A response is always built, whatever its keys.** 1.4.1 fixed
+  unencodable *values*; keys were left alone, and `json.dumps` never
+  consults `default=` for a key, so a result keyed by a tuple (points
+  aggregated by coordinates) raised TypeError outside the request's
+  error handling: HTTP 500 with the id lost. Keys json cannot express
+  become their `str()`, a reference cycle becomes `"[circular]"`, and a
+  payload that resists both becomes an error response that still carries
+  the request id.
+- **The transport's own error bodies are valid JSON too.** The -32022
+  body is built before any JSON-RPC handling and echoed the client's id
+  with plain `json.dumps`; `json.loads` accepts `NaN` / `Infinity`, so a
+  client could send one and get back a body no strict parser accepts,
+  losing the error that lists the versions to retry with. It is built
+  with `dumps_response` now, like every other response.
+- **CORS preflight allows the credential headers.** `authorization`
+  (the transport's bearer token), `x-api-key` and `last-event-id` were
+  missing from `Access-Control-Allow-Headers`, and they are not
+  CORS-safelisted, so exactly the allowlisted browser origins could
+  never make an authenticated call: the browser blocked it before it was
+  sent.
+- **OPTIONS reaches the preflight handler on the universal entry point.**
+  An adapter for a cloud other than AWS sends every method to
+  `handle_request`, which answered 405 to a preflight while the same
+  response headers claimed `Access-Control-Allow-Methods: POST, OPTIONS`.
+  The 405 for other methods now also carries a truthful
+  `Allow: POST, OPTIONS`.
+- **The Lambda error path cannot raise.** `context.aws_request_id` was
+  read a second time inside `except`, so a context without it (a
+  non-Lambda runtime calling this adapter) escaped as a bare exception
+  instead of a 500 with CORS headers. It is read once, before the `try`.
+
 **1.4.1** — hardening from a review of 1.4.0. No protocol change.
 
 - A response is always valid JSON. A NaN or Infinity in a tool result
